@@ -323,11 +323,23 @@ class CPABEService:
         except Exception as e:
             logger.warning(f"Could not save CP-ABE key backup: {e}")
                 
-    def expand_hierarchical_attributes(self, attrs: dict) -> List[str]:
+    def expand_hierarchical_attributes(self, attrs: dict, scheme: str = 'ac17') -> List[str]:
         """
         Convert ABAC attributes to CP-ABE string attributes.
-        Also expands hierarchical attributes (e.g. top_secret -> secret, confidential)
+        AC17 expands hierarchies; TKN20 requires one value per normalized label.
         """
+        if scheme == 'tkn20':
+            normalized = {}
+            for key, value in attrs.items():
+                values = value if isinstance(value, list) else [value]
+                values = {str(v).lower() for v in values if v is not None and str(v)}
+                label = key.lower()
+                normalized[label] = normalized.get(label, set()) | values
+                if len(normalized[label]) > 1:
+                    raise CPABEError('TKN20 requires one value per attribute label.')
+            # Do not expand role/clearance into duplicate labels in a TKN20 map.
+            return sorted(f'{label}:{next(iter(values))}' for label, values in normalized.items() if values)
+
         result = []
         for key, value in attrs.items():
             if not value:
@@ -360,14 +372,14 @@ class CPABEService:
                 except ValueError:
                     pass
                     
-        return list(set(result))
+        return sorted(set(result))
         
     def generate_user_key(self, user_attributes: dict, output_path: str, scheme: str = None):
         """Generate a private key file for a user based on their attributes"""
         if scheme is None:
             scheme = getattr(settings, 'CPABE_SCHEME', 'ac17')
             
-        attr_strings = self.expand_hierarchical_attributes(user_attributes)
+        attr_strings = self.expand_hierarchical_attributes(user_attributes, scheme=scheme)
         attr_str = " ".join(attr_strings)
         logger.info(f"Generating Private Key (Scheme: {scheme}) with attributes: {attr_str}")
         

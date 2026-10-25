@@ -22,6 +22,38 @@ KEYS_DIR = os.environ.get('KEYS_DIR', '/app/config/keys')
 UNSEAL_KEYS_FILE = os.path.join(KEYS_DIR, 'vault_unseal_keys.json')
 TOKEN_FILE = os.path.join(KEYS_DIR, 'vault_token.txt')
 
+
+def unseal_with_keys(client, keys):
+    """Submit stored shares without mistaking partial progress for an unseal."""
+    for key in dict.fromkeys(keys):
+        if not client.sys.is_sealed():
+            break
+        result = client.sys.submit_unseal_key(key)
+        if not result.get('sealed', True):
+            break
+
+    status = client.sys.read_seal_status()
+    if status.get('sealed', True):
+        raise RuntimeError(
+            f"Vault remains sealed: {status.get('progress', 0)}/{status.get('t', '?')} "
+            "unseal shares submitted. Restore the original unseal-key backup or "
+            "complete unsealing in the Vault UI. Do not reset Vault storage."
+        )
+
+
+def wait_for_active_vault(client, attempts=30):
+    """Wait for authenticated operations after unseal and Raft leader election."""
+    for attempt in range(attempts):
+        if client.sys.is_sealed():
+            raise RuntimeError("Vault is sealed; engine setup cannot continue.")
+        try:
+            client.sys.list_mounted_secrets_engines()
+            return
+        except (hvac.exceptions.VaultDown, hvac.exceptions.InternalServerError):
+            if attempt + 1 < attempts:
+                time.sleep(1)
+    raise RuntimeError("Vault is unsealed but its active node did not become ready in time.")
+
 def get_ca_cert_path():
     ca_cert_path = os.environ.get('VAULT_CACERT', '/certs/CyberFortress-RootCA.crt')
     if os.path.exists(ca_cert_path):
@@ -94,10 +126,10 @@ def ensure_kv_engine(client):
                     if "local node not active" in str(retry_e):
                         print(f"Raft leader not ready yet (attempt {attempt+1}/10), waiting...")
                     else:
-                        print(f"Failed to enable KV v2 engine: {retry_e}")
-                        return
+                        raise RuntimeError("Failed to enable KV v2 engine") from retry_e
         else:
-            print(f"Failed to enable KV v2 engine: {e}")
+            raise RuntimeError("Failed to enable KV v2 engine") from e
+        raise RuntimeError("KV v2 engine was not ready after retries") from e
 
 
 def register_abe_plugin(client):
@@ -107,8 +139,7 @@ def register_abe_plugin(client):
         
     plugin_path = '/vault/plugins/vault-plugin-abe'
     if not os.path.exists(plugin_path):
-        print(f"Plugin binary not found at {plugin_path}. Please build it first.")
-        return
+        raise RuntimeError(f"Plugin binary not found at {plugin_path}. Please build it first.")
         
     import hashlib
     with open(plugin_path, "rb") as f:
@@ -130,7 +161,7 @@ def register_abe_plugin(client):
             print(f"Failed to register plugin: {repr(e)}")
             if hasattr(e, 'response') and e.response is not None:
                 print(f"Details: {e.response.text}")
-            return
+            raise RuntimeError("Failed to register Vault ABE plugin") from e
             
     try:
         mounts = client.sys.list_mounted_secrets_engines()
@@ -158,7 +189,7 @@ def register_abe_plugin(client):
             print("ABE engine already enabled at 'abe_tkn20/'.")
             
     except Exception as e:
-        print(f"Failed to enable ABE secrets engines: {e}")
+        raise RuntimeError("Failed to enable ABE secrets engines") from e
 
 def init_and_unseal():
     parser = argparse.ArgumentParser()
@@ -167,7 +198,7 @@ def init_and_unseal():
     is_prod = args.prod
 
     if not wait_for_vault():
-        return
+        raise RuntimeError("Vault did not become reachable in time.")
 
     ca_cert_path = get_ca_cert_path()
     if VAULT_ADDR.startswith('https'):
@@ -183,8 +214,7 @@ def init_and_unseal():
     try:
         is_initialized = client.sys.is_initialized()
     except Exception as e:
-        print(f"Failed to check initialization status: {e}")
-        return
+        raise RuntimeError("Failed to check Vault initialization status") from e
 
     if not is_initialized:
         shares = 5 if is_prod else 1
@@ -210,10 +240,7 @@ def init_and_unseal():
         
         # Unseal for initial setup
         print("Unsealing Vault for initial setup...")
-        for key in keys:
-            res = client.sys.submit_unseal_key(key)
-            if not res.get('sealed', True):
-                break
+        unseal_with_keys(client, keys)
         
         # Wait for Raft leader election
         print("Waiting for Raft leader election...")
@@ -240,25 +267,20 @@ def init_and_unseal():
                 print("Vault is SEALED. Auto-unseal is DISABLED for security.")
                 print(f"Please log in to Vault UI at {VAULT_ADDR} and unseal manually.")
                 print("=======================================================\033[0m\n")
-                return
+                raise RuntimeError("Production Vault requires manual unsealing.")
 
             print("Vault is sealed. Attempting auto-unseal...")
             if not os.path.exists(UNSEAL_KEYS_FILE):
-                print(f"Cannot unseal: {UNSEAL_KEYS_FILE} not found!")
-                return
+                raise RuntimeError(f"Cannot unseal: {UNSEAL_KEYS_FILE} not found!")
             
             with open(UNSEAL_KEYS_FILE, 'r') as f:
                 data = json.load(f)
                 keys = data.get('keys', [])
                 
             if not keys:
-                print("No keys found in unseal file!")
-                return
+                raise RuntimeError("No keys found in unseal file!")
                 
-            for key in keys:
-                res = client.sys.submit_unseal_key(key)
-                if not res.get('sealed', True):
-                    break
+            unseal_with_keys(client, keys)
             print("Vault unsealed successfully.")
         else:
             print("Vault is already unsealed.")
@@ -267,6 +289,8 @@ def init_and_unseal():
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, 'r') as f:
             client.token = f.read().strip()
+
+        wait_for_active_vault(client)
         
         # Always ensure KV v2 engine is enabled (idempotent)
         ensure_kv_engine(client)
@@ -274,7 +298,11 @@ def init_and_unseal():
         # Register ABE plugin if configured
         register_abe_plugin(client)
     else:
-        print("No root token found. Skipping plugin registration.")
+        raise RuntimeError("No saved Vault token found; engine setup cannot continue.")
 
 if __name__ == '__main__':
-    init_and_unseal()
+    try:
+        init_and_unseal()
+    except Exception as exc:
+        print(f"Vault setup failed: {exc}")
+        raise SystemExit(1)

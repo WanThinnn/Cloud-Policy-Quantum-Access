@@ -41,6 +41,7 @@ Các lệnh dưới đây là hướng dẫn cho nhiệm vụ tương ứng, kh�
 | Cài Python dependency vào môi trường riêng | root | `rtk python -m pip install -r src/requirements.txt` |
 | Django system checks | `src/` | `rtk python manage.py check --settings=config.settings.development` |
 | Test Django hiện có, DB test riêng | `src/` | `rtk python manage.py test crypto_access --settings=config.settings.development` |
+| Regression R01/R02, DB/keys/storage cô lập | `src/` | `rtk python -m django test security_tests --settings=security_tests.settings --noinput` |
 | Xem migration model còn thiếu, không tạo file | `src/` | `rtk python manage.py makemigrations --check --dry-run --settings=config.settings.development` |
 | Cài frontend dependency | `src/theme/static_src/` | `rtk npm ci` |
 | Build Tailwind | `src/theme/static_src/` | `rtk npm run build` |

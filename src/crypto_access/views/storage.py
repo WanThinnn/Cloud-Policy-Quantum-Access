@@ -6,6 +6,7 @@ from rest_framework.decorators import action, throttle_classes
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
 from crypto_access.permissions import IsSuperAdmin
 from django.http import HttpResponse
 from django.utils import timezone
@@ -33,9 +34,11 @@ from ..serializers.storage import (
     AssignPolicyToFileSerializer,
     PolicyListForAssignmentSerializer
 )
+from ..serializers.policy import AccessPolicySerializer
 from ..services.storage.factory import get_storage_service
 from ..services.cpabe_service import cpabe_service
 from ..services.casbin_service import casbin_service
+from ..services.tkn20_policy import bypass_attributes
 from ..throttles import CPABEDecryptThrottle, CPABEEncryptThrottle
 import tempfile
 import time
@@ -112,6 +115,29 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
     serializer_class = UploadedFileSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def _prepare_inline_policy(self, request, data):
+        """Validate a global policy without persisting it or extending file-owner rights."""
+        if not data.get('create_new_policy'):
+            return None
+        # Match the policy management API's role and ABAC requirements.
+        if not IsSuperAdmin().has_permission(request, self) or not casbin_service.check_access(
+            request.user, 'policy', '*'
+        ):
+            raise PermissionDenied("You do not have permission to create global access policies.")
+        serializer = AccessPolicySerializer(data={
+            'name': data['new_policy_name'],
+            'description': data.get('new_policy_description', ''),
+            'subject_condition': data['new_policy_subject_condition'],
+            'resource': data.get('new_policy_resource', 'document'),
+            'action': data.get('new_policy_action', 'read'),
+            'effect': data.get('new_policy_effect', 'allow'),
+            'priority': data.get('new_policy_priority', 100),
+        }, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        policy = AccessPolicy(**serializer.validated_data, created_by=request.user)
+        policy.cpabe_policy = policy._generate_cpabe_policy()
+        return policy
     
     def _decrypt_file_if_needed(self, file_data, bucket_name, file_path, user, is_owner=False, cpabe_policy_str=None):
         """Helper to decrypt file if it has a CP-ABE policy"""
@@ -135,7 +161,10 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         
         # CP-ABE Bypass for SuperAdmin and File Owner
         # We mathematically satisfy the policy by extracting required attributes from the policy string
-        if user.is_superuser or is_owner:
+        privileged_bypass = user.is_superuser or is_owner
+        if privileged_bypass and abe_scheme == 'tkn20':
+            user_attrs = bypass_attributes(user_attrs, policies_to_parse)
+        elif privileged_bypass:
             import re
             for p_str in policies_to_parse:
                 if p_str:
@@ -155,6 +184,9 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         attrs_str = json.dumps(user_attrs, sort_keys=True)
         attrs_hash = hashlib.sha3_256(attrs_str.encode('utf-8')).hexdigest()
         cache_key = f"cpabe_key_{abe_scheme}_{user.id}_{attrs_hash}"
+        if privileged_bypass and abe_scheme == 'tkn20':
+            # Old keys may contain silently overwritten duplicate TKN20 labels.
+            cache_key = f"cpabe_key_{abe_scheme}_bypass_v2_{user.id}_{attrs_hash}"
         encrypted_cached_key = cache.get(cache_key)
         
         cached_key_data = None
@@ -283,6 +315,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['post'])
     @throttle_classes([CPABEEncryptThrottle])
+    @transaction.atomic
     def upload(self, request):
         """
         Upload file to Supabase Storage
@@ -301,6 +334,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         """
         serializer = FileUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        new_policy = self._prepare_inline_policy(request, serializer.validated_data)
         
         file = serializer.validated_data['file']
         bucket_name = serializer.validated_data['bucket_name']
@@ -351,35 +385,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         cpabe_policy_str = None
         
         if serializer.validated_data.get('create_new_policy'):
-            policy_obj = AccessPolicy.objects.create(
-                name=serializer.validated_data['new_policy_name'],
-                description=serializer.validated_data.get('new_policy_description', ''),
-                subject_condition=serializer.validated_data['new_policy_subject_condition'],
-                resource=serializer.validated_data.get('new_policy_resource', 'document'),
-                action=serializer.validated_data.get('new_policy_action', 'read'),
-                effect=serializer.validated_data.get('new_policy_effect', 'allow'),
-                priority=serializer.validated_data.get('new_policy_priority', 100)
-            )
+            policy_obj = new_policy
             cpabe_policy_str = policy_obj.cpabe_policy
-        elif not policy_id and serializer.validated_data.get('new_policy_name'):
-            # Create a new FileAccessPolicy
-            policy_name = serializer.validated_data.get('new_policy_name')
-            policy_obj, created = FileAccessPolicy.objects.get_or_create(
-                name=policy_name,
-                defaults={
-                    'description': f"Auto-generated policy for {request.user.username}",
-                    'effect': 'allow',
-                    'resource': 'document',
-                    'action': 'read',
-                    'is_active': True,
-                    'created_by': request.user if request.user.is_authenticated else None
-                }
-            )
-            cpabe_policy_str = policy_obj.cpabe_policy
-            if created:
-                logger.info(f"Created new policy '{policy_obj.name}' during upload", extra={"user.name": request.user.username, "user.id": request.user.id})
-                # Assign this user to the policy explicitly
-                policy_obj.granted_users.add(request.user)
         elif policy_id:
             try:
                 policy_obj = AccessPolicy.objects.get(id=policy_id)
@@ -595,6 +602,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             )
             
             if policy_obj:
+                if policy_obj.pk is None:
+                    policy_obj.save()
                 FileAccessPolicy.objects.create(
                     uploaded_file=uploaded_file,
                     bucket=bucket,
@@ -609,6 +618,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             )
             
         except Exception as e:
+            transaction.set_rollback(True)
             return Response(
                 {'error': f"Upload failed: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -1697,6 +1707,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=False, methods=['post'])
+    @transaction.atomic
     def assign_policy(self, request):
         """
         Assign a policy to a file or folder.
@@ -1719,30 +1730,6 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Get or create the policy
-        policy = None
-        if data.get('policy_id'):
-            try:
-                policy = AccessPolicy.objects.get(id=data['policy_id'])
-            except AccessPolicy.DoesNotExist:
-                return Response(
-                    {'error': f"Policy ID {data['policy_id']} not found"},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-        elif data.get('create_new_policy'):
-            # Create new policy for this file with all fields from Policy Builder
-            policy = AccessPolicy.objects.create(
-                name=data['new_policy_name'],
-                description=data.get('new_policy_description', ''),
-                subject_condition=data['new_policy_subject_condition'],
-                resource=data.get('new_policy_resource', 'document'),
-                action=data.get('new_policy_action', 'read'),
-                effect=data['new_policy_effect'],
-                priority=data.get('new_policy_priority', 100),
-                created_by=request.user
-            )
-            logger.info(f"Created new policy '{policy.name}' for file assignment")
-        
         # Create FileAccessPolicy
         file_record = None
         folder_path = None
@@ -1757,16 +1744,6 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 )
         else:  # folder
             folder_path = file_path if file_path.endswith('/') else file_path + '/'
-        
-        # Check if policy already assigned
-        existing = FileAccessPolicy.objects.filter(
-            policy=policy,
-            bucket=bucket,
-        )
-        if target_type == 'file':
-            existing = existing.filter(uploaded_file=file_record)
-        else:
-            existing = existing.filter(folder_path=folder_path)
         
         # Determine replace mode
         replace_policies = self.request.data.get('replace', False) or self.request.query_params.get('replace', 'false').lower() == 'true'
@@ -1784,12 +1761,35 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 {'error': 'Only the file owner or an administrator can modify its policy.'},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Authorize both the target and global policy creation before any DB write.
+        policy = self._prepare_inline_policy(request, data)
+        if policy is None:
+            try:
+                policy = AccessPolicy.objects.get(id=data['policy_id'])
+            except AccessPolicy.DoesNotExist:
+                return Response(
+                    {'error': f"Policy ID {data['policy_id']} not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        existing = (
+            FileAccessPolicy.objects.filter(policy=policy, bucket=bucket)
+            if policy.pk else FileAccessPolicy.objects.none()
+        )
+        if target_type == 'file':
+            existing = existing.filter(uploaded_file=file_record)
+        else:
+            existing = existing.filter(folder_path=folder_path)
         
         if existing.exists() and not replace_policies:
             return Response(
                 {'error': 'This policy is already assigned to this file/folder'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        if policy.pk is None:
+            policy.save()
         
         # Handle Encryption / Re-encryption
         if target_type == 'file':
@@ -1924,6 +1924,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                             else:
                                 latest_version.save(update_fields=['cpabe_policy'])
             except Exception as e:
+                transaction.set_rollback(True)
                 logger.error(f"Failed to update encryption for file {file_path}: {e}")
                 return Response({'error': f"Failed to update encryption: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         else:

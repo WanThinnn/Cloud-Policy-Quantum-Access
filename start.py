@@ -552,6 +552,7 @@ def main(argv: list[str]) -> int:
                     time.sleep(2)
             if not success:
                 print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                return 1
             
             extract_pqc_raw_key(c)
             if args.ai:
@@ -574,6 +575,7 @@ def main(argv: list[str]) -> int:
                     time.sleep(2)
             if not success:
                 print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                return 1
             
             extract_pqc_raw_key(c)
             if args.ai:
@@ -603,6 +605,7 @@ def main(argv: list[str]) -> int:
                     time.sleep(2)
             if not success:
                 print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                return 1
             
             extract_pqc_raw_key(c)
             if args.ai:
@@ -730,6 +733,7 @@ def main(argv: list[str]) -> int:
                 run(c + vault_cmd)
             except subprocess.CalledProcessError:
                 print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                return 1
             
             extract_pqc_raw_key(c)
             if args.ai:

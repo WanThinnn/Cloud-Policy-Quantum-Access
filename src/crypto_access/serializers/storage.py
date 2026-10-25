@@ -92,6 +92,10 @@ class FileUploadSerializer(serializers.Serializer):
         return value
 
     def validate(self, data):
+        if data.get('policy_id') and data.get('create_new_policy'):
+            raise serializers.ValidationError("Choose an existing policy or create a new one, not both.")
+        if data.get('new_policy_name') and not data.get('policy_id') and not data.get('create_new_policy'):
+            raise serializers.ValidationError("Set create_new_policy to create a named policy.")
         if data.get('create_new_policy'):
             required_fields = ['new_policy_name', 'new_policy_subject_condition', 'new_policy_effect']
             for field in required_fields:
@@ -173,6 +177,8 @@ class AssignPolicyToFileSerializer(serializers.Serializer):
     
     def validate(self, data):
         # Either policy_id or create_new_policy with required fields
+        if data.get('policy_id') and data.get('create_new_policy'):
+            raise serializers.ValidationError("Choose an existing policy or create a new one, not both.")
         if not data.get('policy_id') and not data.get('create_new_policy'):
             raise serializers.ValidationError(
                 "Either 'policy_id' or 'create_new_policy' with policy details is required"
