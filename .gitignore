@@ -532,3 +532,4 @@ config/openvpn/*
 !config/certs/CyberFortress-RootCA.crt
 !config/certs/CyberFortress-RootCA.key
 !config/certs/root_ca_raw_pk.b64
+docs/vi/release-3.1-readiness.md
