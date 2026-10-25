@@ -9,6 +9,7 @@ from django.core.validators import URLValidator
 from .setting_service import SettingService
 
 SAFE_DEFAULTS = {
+    'SUPER_ADMIN_REQUIRE_POLICY': False,
     'AI_FEATURES_ENABLED': False, 'OLLAMA_MODEL': 'qwen2.5-coder:3b', 'OLLAMA_KEEP_ALIVE': '-1',
     'UPLOAD_MAX_SIZE_MB': 10, 'LOGIN_MAX_ATTEMPTS': 5, 'LOGIN_LOCKOUT_SECONDS': 900,
     'IMPOSSIBLE_TRAVEL_MINUTES': 30,
@@ -30,6 +31,10 @@ def validate_ollama_endpoint(value):
 def catalog():
     """Fresh fields so forms and runtime consumers use the same validation."""
     return {
+        'SUPER_ADMIN_REQUIRE_POLICY': ('Document access', forms.BooleanField(
+            required=False, label='Require SuperAdmin to match document policies',
+            help_text='On: SuperAdmin must match access policies, even for owned files. '
+                      'Off: SuperAdmin can bypass document policies. Administration stays accessible.'), False),
         'WEBAUTHN_RP_NAME': ('Passkeys', forms.CharField(
             max_length=64, label='Passkey display name',
             help_text='Shown when registering new passkeys. The relying party ID and origin stay unchanged.'),
@@ -102,6 +107,12 @@ def catalog():
 
 def get_runtime_setting(key):
     """Reject invalid stored values; fall back to deployment value or a safe built-in default."""
+    if key == 'SUPER_ADMIN_REQUIRE_POLICY':
+        # This revocation control must not reuse a stale worker/Redis cache value.
+        # An invalid active value is treated as strict; DB errors propagate rather than enabling bypass.
+        from crypto_access.models import SystemSetting
+        row = SystemSetting.objects.filter(key=key, is_active=True).first()
+        return row.value is not False if row is not None else False
     _, field, default = catalog()[key]
     value = SettingService.get_setting(key, default)
     try:

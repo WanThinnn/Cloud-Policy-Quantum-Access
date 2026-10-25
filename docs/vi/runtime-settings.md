@@ -4,10 +4,11 @@ Vào **System → System Settings** (`/manage/settings/`). Backend chỉ cho tà
 
 ## Những mục đã chuyển lên UI
 
-Trang quản lý 20 giá trị thông thường và 1 mật khẩu SMTP:
+Trang quản lý 21 giá trị thông thường và 1 mật khẩu SMTP:
 
 | Nhóm | Khóa | Hiệu lực |
 | --- | --- | --- |
+| Document access | `SUPER_ADMIN_REQUIRE_POLICY` | Bật: super_admin phải khớp quyền file; tắt: cho phép bypass như trước. Default False |
 | Passkey | `WEBAUTHN_RP_NAME` | Tên hiển thị khi đăng ký passkey mới, không đổi RP ID/origin |
 | Email | `EMAIL_DELIVERY_MODE` | SMTP hoặc console phát triển; console ghi cả nội dung OTP vào log |
 | Email | `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER` | Máy chủ, cổng và tài khoản SMTP |
@@ -31,6 +32,19 @@ Nút **Test SMTP connection** kết nối, thương lượng TLS và đăng nh�
 **Save settings** lưu toàn bộ giá trị trên form vào `SystemSetting`, kể cả các giá trị trước đó đang lấy từ mặc định triển khai. GET không tự seed hay thay `.env`. Thứ tự ưu tiên: bản ghi active đã lưu → cấu hình triển khai hiện có → mặc định hợp lệ. Các khóa mới về timeout/hạn mức có mặc định trong catalog, không bắt buộc thêm biến `.env`.
 
 Sau khi lưu có thể quản lý những mục này hoàn toàn qua UI. Các biến cùng tên trong `.env` trở thành fallback, không tự ghi đè UI. Nếu muốn bỏ mật khẩu SMTP khỏi `.env`, trước tiên nhập/lưu mật khẩu trên trang để tạo reference Vault; chỉ lưu form với ô mật khẩu trống sẽ tiếp tục dùng mật khẩu triển khai.
+
+## Công tắc bắt buộc SuperAdmin khớp policy
+
+**Require SuperAdmin to match document policies**, trong nhóm **Document access**, mặc định tắt:
+
+- **Bật:** super_admin/Django superuser phải qua general ABAC và policy riêng/kế thừa của file; không đi tắt qua owner/granted_users. Browse/list dùng evaluator thật để giữ đúng deny priority. Preview/download kiểm tra lại trước khi đọc storage, kể cả plaintext và version cũ.
+- Giải mã AC17/TKN20 trong chế độ này chỉ dùng thuộc tính thật, không tự thêm thuộc tính để khớp ciphertext. Namespace khóa cache `*_strict_v1_*` tách khỏi khóa bypass đã sinh trước đó.
+- **Tắt:** quyền bypass cho super_admin được phục hồi. Quyền owner của người dùng thường không thay đổi bởi công tắc này.
+- Flag được đọc trực tiếp DB để tránh cache cũ làm bypass quay lại; giá trị active sai kiểu bị xử lý như bật strict. Lỗi DB không được chuyển thành cho phép bypass.
+- Giữ quyền quản trị users/policies và trang settings để super_admin có thể thay policy hoặc tắt strict. Đây là chế độ kiểm tra quyền đọc dữ liệu trong app, không phải tước quyền quản trị của người kiểm soát hệ thống; không thu hồi dữ liệu đã tải về hay signed URL đã phát hành.
+- File không có policy riêng vẫn cần general ABAC; strict không tự tạo policy mới. Đường dẫn không tìm được record hợp lệ bị chặn trong strict. `UploadedFile.find_by_path` dùng blind index khi field encryption bật, dùng chung cho lookup file, policy và granted_users.
+
+Chế độ strict lọc bằng evaluator từng file trước pagination; đây là lựa chọn ưu tiên đúng policy/deny/folder inheritance. Cần đo hiệu năng riêng nếu triển khai với số lượng file lớn.
 
 ## Những mục vẫn thuộc cấu hình triển khai
 

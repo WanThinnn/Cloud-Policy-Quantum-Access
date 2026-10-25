@@ -86,6 +86,20 @@ class UploadedFile(models.Model):
     
     def is_image(self):
         return self.file_type == 'image'
+
+    @classmethod
+    def find_by_path(cls, bucket_name, file_path):
+        """Resolve logical paths with the same blind index used when writing metadata."""
+        from django.conf import settings
+        query = cls.objects.filter(bucket__name=bucket_name)
+        if getattr(settings, 'FIELD_ENCRYPTION', False):
+            import hashlib
+            import hmac
+            from .fields import get_encryption_key
+            digest = hmac.new(get_encryption_key(info=b'blind_index'), str(file_path).encode('utf-8'),
+                              hashlib.sha3_256).hexdigest()
+            return query.filter(file_path_hash=digest).first()
+        return query.filter(file_path=file_path).first()
     
     def is_pdf(self):
         return self.file_type == 'pdf'
@@ -268,10 +282,7 @@ class FileAccessPolicy(models.Model):
         # Direct file policy
         try:
             bucket = StorageBucket.objects.get(name=bucket_name)
-            file_record = UploadedFile.objects.filter(
-                bucket=bucket, 
-                file_path=file_path
-            ).first()
+            file_record = UploadedFile.find_by_path(bucket_name, file_path)
             
             if file_record:
                 file_policies = cls.objects.filter(
@@ -303,10 +314,7 @@ class FileAccessPolicy(models.Model):
         """
         try:
             bucket = StorageBucket.objects.get(name=bucket_name)
-            file_record = UploadedFile.objects.filter(
-                bucket=bucket, 
-                file_path=file_path
-            ).first()
+            file_record = UploadedFile.find_by_path(bucket_name, file_path)
             
             if file_record:
                 # Check direct file grants

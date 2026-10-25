@@ -39,25 +39,14 @@ from ..services.storage.factory import get_storage_service
 from ..services.cpabe_service import cpabe_service
 from ..services.casbin_service import casbin_service
 from ..services.tkn20_policy import bypass_attributes
+from ..services.document_access import can_bypass_document_policy, requires_document_policy
 from ..throttles import CPABEDecryptThrottle, CPABEEncryptThrottle
 import tempfile
 import time
 
 def get_db_file_by_path(bucket_name, file_path):
     from crypto_access.models import UploadedFile
-    from django.conf import settings
-    field_encryption = getattr(settings, 'FIELD_ENCRYPTION', False)
-    
-    if field_encryption:
-        from crypto_access.models.fields import get_encryption_key
-        import hmac
-        import hashlib
-        key = get_encryption_key(info=b"blind_index")
-        h = hmac.new(key, str(file_path).encode('utf-8'), hashlib.sha3_256)
-        hash_value = h.hexdigest()
-        return UploadedFile.objects.filter(bucket__name=bucket_name, file_path_hash=hash_value).first()
-    else:
-        return UploadedFile.objects.filter(bucket__name=bucket_name, file_path=file_path).first()
+    return UploadedFile.find_by_path(bucket_name, file_path)
 
 logger = logging.getLogger('crypto_access.storage')
 
@@ -139,8 +128,12 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         policy.cpabe_policy = policy._generate_cpabe_policy()
         return policy
     
-    def _decrypt_file_if_needed(self, file_data, bucket_name, file_path, user, is_owner=False, cpabe_policy_str=None):
+    def _decrypt_file_if_needed(self, file_data, bucket_name, file_path, user, is_owner=False,
+                                cpabe_policy_str=None, access_action='read'):
         """Helper to decrypt file if it has a CP-ABE policy"""
+        strict = requires_document_policy(user)
+        if strict:
+            self._require_document_read(user, bucket_name, file_path, access_action)
 
         if cpabe_policy_str is not None:
             is_encrypted = bool(cpabe_policy_str)
@@ -161,7 +154,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         
         # CP-ABE Bypass for SuperAdmin and File Owner
         # We mathematically satisfy the policy by extracting required attributes from the policy string
-        privileged_bypass = user.is_superuser or is_owner
+        privileged_bypass = can_bypass_document_policy(user) or (is_owner and not strict)
         if privileged_bypass and abe_scheme == 'tkn20':
             user_attrs = bypass_attributes(user_attrs, policies_to_parse)
         elif privileged_bypass:
@@ -184,6 +177,9 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         attrs_str = json.dumps(user_attrs, sort_keys=True)
         attrs_hash = hashlib.sha3_256(attrs_str.encode('utf-8')).hexdigest()
         cache_key = f"cpabe_key_{abe_scheme}_{user.id}_{attrs_hash}"
+        if strict:
+            # Never reuse an attribute-forged key generated before the switch was enabled.
+            cache_key = f"cpabe_key_{abe_scheme}_strict_v1_{user.id}_{attrs_hash}"
         if privileged_bypass and abe_scheme == 'tkn20':
             # Old keys may contain silently overwritten duplicate TKN20 labels.
             cache_key = f"cpabe_key_{abe_scheme}_bypass_v2_{user.id}_{attrs_hash}"
@@ -286,7 +282,14 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(uploaded_by=self.request.user)
         
         # ABAC Post-filtering: only return files the user is allowed to see
-        if self.request.user.is_authenticated and not self.request.user.is_superuser:
+        if self.request.user.is_authenticated and requires_document_policy(self.request.user):
+            # Reuse the authoritative evaluator, including inherited policies and deny priority.
+            policy_action = 'download' if getattr(self, 'action', None) == 'download' else 'read'
+            allowed_ids = [row.pk for row in queryset if casbin_service.check_file_access_with_fallback(
+                self.request.user, row.bucket.name, row.file_path, policy_action
+            )[0]]
+            return queryset.filter(pk__in=allowed_ids)
+        if self.request.user.is_authenticated and not can_bypass_document_policy(self.request.user):
             # Step 1: Pre-evaluate which policies this user satisfies
             allowed_policy_ids = casbin_service.get_allowed_policies_for_user(
                 self.request.user, 'read'
@@ -313,6 +316,12 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         
         return queryset
     
+    def _require_document_read(self, user, bucket_name, file_path, action='read'):
+        if requires_document_policy(user):
+            allowed, _ = casbin_service.check_file_access_with_fallback(user, bucket_name, file_path, action)
+            if not allowed:
+                raise PermissionDenied('Your attributes do not grant access to this document.')
+
     @action(detail=False, methods=['post'], throttle_classes=[CPABEEncryptThrottle])
     @transaction.atomic
     def upload(self, request):
@@ -627,6 +636,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
     def download(self, request, pk=None):
         """Download file from Supabase Storage"""
         uploaded_file = self.get_object()
+        self._require_document_read(request.user, uploaded_file.bucket.name, uploaded_file.file_path, 'download')
         
         # Check if file is infected
         if uploaded_file.metadata and uploaded_file.metadata.get('clamav_scan') == 'infected':
@@ -664,7 +674,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 uploaded_file.file_path, 
                 request.user,
                 is_owner=is_owner,
-                cpabe_policy_str=cpabe_policy_str
+                cpabe_policy_str=cpabe_policy_str,
+                access_action='download',
             )
             
             response = HttpResponse(file_data, content_type=uploaded_file.mime_type)
@@ -682,6 +693,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
             return response
             
+        except PermissionDenied:
+            raise
         except Exception as e:
             return Response(
                 {'error': f"Download failed: {str(e)}"},
@@ -977,6 +990,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             msg = uploaded_file.metadata.get('clamav_msg', 'Unknown malware')
             return Response({'error': f'File đã bị khóa do chứa mã độc: {msg}.'}, status=status.HTTP_403_FORBIDDEN)
             
+        self._require_document_read(request.user, bucket_name, file_path, 'download')
         is_owner = uploaded_file and uploaded_file.uploaded_by == request.user
         
         version_param = request.query_params.get('version')
@@ -1006,7 +1020,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 file_path, 
                 request.user,
                 is_owner=is_owner,
-                cpabe_policy_str=cpabe_policy_str
+                cpabe_policy_str=cpabe_policy_str,
+                access_action='download',
             )
             
             file_name = file_path.split('/')[-1]
@@ -1037,6 +1052,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
             return response
             
+        except PermissionDenied:
+            raise
         except Exception as e:
             return Response(
                 {'error': str(e)},
@@ -1062,6 +1079,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         
         # Check if user is owner of this file (can bypass ABAC for their own files)
         uploaded_file = get_db_file_by_path(bucket_name, file_path)
+        self._require_document_read(request.user, bucket_name, file_path)
         is_owner = uploaded_file and uploaded_file.uploaded_by == request.user
         
         version_param = request.query_params.get('version')
@@ -1121,6 +1139,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f"inline; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
             return response
             
+        except PermissionDenied:
+            raise
         except Exception as e:
             return Response(
                 {'error': str(e)},

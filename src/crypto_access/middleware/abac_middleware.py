@@ -103,6 +103,9 @@ class ABACMiddleware:
         
         Returns True if user is owner or has explicit grant, False otherwise.
         """
+        from crypto_access.services.document_access import requires_document_policy
+        if requires_document_policy(request.user):
+            return False
         if action not in ['download', 'delete', 'read']:
             return False
         

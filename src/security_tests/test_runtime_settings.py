@@ -104,6 +104,19 @@ class RuntimeSettingsTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertFalse(SystemSetting.objects.exists())
 
+    def test_document_strict_switch_saves_and_can_be_disabled_without_losing_settings_access(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.request('post', self.payload(SUPER_ADMIN_REQUIRE_POLICY='on'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(get_runtime_setting('SUPER_ADMIN_REQUIRE_POLICY'), True)
+        self.assertEqual(self.request().status_code, 200)
+        data = self.payload()
+        data.pop('SUPER_ADMIN_REQUIRE_POLICY')  # Native unchecked checkbox is absent from the POST.
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.request('post', data)
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(get_runtime_setting('SUPER_ADMIN_REQUIRE_POLICY'), False)
+
     def test_save_typed_values_with_audit_and_immediate_cache_invalidation(self):
         self.store('UPLOAD_MAX_SIZE_MB', 12)
         self.assertEqual(get_runtime_setting('UPLOAD_MAX_SIZE_MB'), 12)

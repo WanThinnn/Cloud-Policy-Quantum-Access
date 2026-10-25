@@ -70,6 +70,9 @@ class TKN20PolicyTests(SimpleTestCase):
 
 class TKN20DecryptionBypassTests(SimpleTestCase):
     def setUp(self):
+        setting_patch = patch('crypto_access.services.document_access.get_runtime_setting', return_value=False)
+        self.strict_setting = setting_patch.start()
+        self.addCleanup(setting_patch.stop)
         original_crypto = vars(storage_views)['cpabe_service']
         self.crypto = Mock()
         storage_views.cpabe_service = self.crypto
@@ -83,9 +86,9 @@ class TKN20DecryptionBypassTests(SimpleTestCase):
         self.crypto.generate_user_key.side_effect = generate
         self.crypto.decrypt_buffer.return_value = b'recovered'
 
-    def decrypt(self, superuser=False, owner=False):
+    def decrypt(self, superuser=False, owner=False, scheme='tkn20'):
         user = SimpleNamespace(id=123, username='test-user', is_superuser=superuser)
-        with patch.object(storage_views, 'get_db_file_by_path', return_value=SimpleNamespace(abe_scheme='tkn20')), patch(
+        with patch.object(storage_views, 'get_db_file_by_path', return_value=SimpleNamespace(abe_scheme=scheme)), patch(
             'crypto_access.views.storage.casbin_service.get_user_attributes', return_value={'user_type': 'super_admin'}
         ), patch.object(storage_views.cache, 'get', return_value=None), patch.object(
             storage_views.cache, 'set'
@@ -103,8 +106,35 @@ class TKN20DecryptionBypassTests(SimpleTestCase):
         self.assertIn('tkn20_bypass_v2_', cache_key)
 
     def test_owner_uses_the_same_consistent_bypass(self):
+        self.strict_setting.return_value = True  # The switch targets privileged admins, not ordinary owners.
         self.decrypt(owner=True)
         self.assertEqual(self.generated, [({'user_type': 'data_owner'}, 'tkn20')])
+
+    def test_strict_superuser_owner_uses_real_attributes_and_isolated_cache(self):
+        self.strict_setting.return_value = True
+        with patch('crypto_access.views.storage.casbin_service.check_file_access_with_fallback',
+                   return_value=(True, 'matched')):
+            _, cache_key = self.decrypt(superuser=True, owner=True)
+        self.assertEqual(self.generated, [({'user_type': 'super_admin'}, 'tkn20')])
+        self.assertIn('strict_v1', cache_key)
+        self.assertNotIn('bypass_v2', cache_key)
+
+    def test_strict_ac17_uses_real_attributes_and_isolated_cache(self):
+        self.strict_setting.return_value = True
+        with patch('crypto_access.views.storage.casbin_service.check_file_access_with_fallback',
+                   return_value=(True, 'matched')):
+            _, cache_key = self.decrypt(superuser=True, owner=True, scheme='ac17')
+        self.assertEqual(self.generated, [({'user_type': 'super_admin'}, 'ac17')])
+        self.assertIn('ac17_strict_v1', cache_key)
+
+    def test_strict_nonmatching_policy_is_rejected_before_key_generation(self):
+        from rest_framework.exceptions import PermissionDenied
+        self.strict_setting.return_value = True
+        with patch('crypto_access.views.storage.casbin_service.check_file_access_with_fallback',
+                   return_value=(False, 'no_match')):
+            with self.assertRaises(PermissionDenied):
+                self.decrypt(superuser=True, owner=True)
+        self.assertEqual(self.generated, [])
 
     def test_ordinary_user_attributes_are_not_forged(self):
         _, cache_key = self.decrypt()

@@ -357,9 +357,12 @@ class CasbinService:
            - Explicit DENY → Return False
            - No policy → Return False (Default Deny)
            
-        Superusers bypass all checks.
+        Superusers bypass administration checks. Document bypass respects runtime strict mode.
         """
-        if user.is_superuser:
+        from .document_access import can_bypass_document_policy
+        if (resource == 'document' and can_bypass_document_policy(user)) or (
+            resource != 'document' and user.is_superuser
+        ):
             return True
             
         abac_result, abac_reason = self._check_abac(user, resource, action)
@@ -437,12 +440,14 @@ class CasbinService:
         user_attrs = self.get_user_attributes(user)
         attrs_str = json.dumps(user_attrs, sort_keys=True)
         attrs_hash = hashlib.sha3_256(attrs_str.encode()).hexdigest()[:16]
-        cache_key = f"allowed_policies_{user.id}_{action}_{attrs_hash}"
+        from .document_access import can_bypass_document_policy, requires_document_policy
+        strict = requires_document_policy(user)
+        cache_key = f"allowed_policies_v2_{user.id}_{action}_{attrs_hash}_{strict}"
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
         
-        if user.is_superuser:
+        if can_bypass_document_policy(user):
             return list(AccessPolicy.objects.filter(is_active=True).values_list('id', flat=True))
             
         user_attrs = self.get_user_attributes(user)
@@ -499,9 +504,18 @@ class CasbinService:
         # Get user attributes
         user_attrs = self.get_user_attributes(user)
         
-        # Superuser always has access
-        if user.is_superuser:
+        # Document bypass is configurable independently from administration privileges.
+        from .document_access import can_bypass_document_policy
+        if can_bypass_document_policy(user):
             return True, "superuser_bypass"
+
+        from .document_access import requires_document_policy
+        strict = requires_document_policy(user)
+        if strict:
+            from crypto_access.models import UploadedFile
+            file_record = UploadedFile.find_by_path(bucket_name, file_path)
+            if file_record is None or file_record.is_deleted:
+                return False, 'strict_document_not_registered'
         
         # Get all policies for this file
         file_policies = FileAccessPolicy.get_policies_for_file(bucket_name, file_path)
@@ -516,6 +530,8 @@ class CasbinService:
         sorted_policies = sorted(file_policies, key=lambda p: p.priority)
         
         for policy in sorted_policies:
+            if strict and not policy.is_active:
+                continue
             # Check if action matches
             # If asking for download, requires explicit download or wildcard
             # If asking for read, download policy also grants read
