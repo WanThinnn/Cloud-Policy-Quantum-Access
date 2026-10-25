@@ -1,4 +1,5 @@
 from rest_framework.throttling import UserRateThrottle
+from .services.runtime_settings import get_runtime_setting
 
 class CPABEDecryptThrottle(UserRateThrottle):
     """
@@ -8,6 +9,9 @@ class CPABEDecryptThrottle(UserRateThrottle):
     """
     scope = 'cpabe_decrypt'
 
+    def get_rate(self):
+        return f"{get_runtime_setting('CPABE_DECRYPT_PER_MINUTE')}/min"
+
 
 class CPABEEncryptThrottle(UserRateThrottle):
     """
@@ -15,3 +19,6 @@ class CPABEEncryptThrottle(UserRateThrottle):
     Default: 5 requests per minute per user.
     """
     scope = 'cpabe_encrypt'
+
+    def get_rate(self):
+        return f"{get_runtime_setting('CPABE_ENCRYPT_PER_MINUTE')}/min"

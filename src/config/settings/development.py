@@ -47,7 +47,7 @@ CORS_ALLOW_CREDENTIALS = True
 
 
 # Email backend for development (console)
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_BACKEND = 'crypto_access.services.email_backend.RuntimeEmailBackend'
 
 
 # Django Debug Toolbar (optional, uncomment if installed)

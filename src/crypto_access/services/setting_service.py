@@ -32,7 +32,7 @@ class SettingService:
             return value
             
         except SystemSetting.DoesNotExist:
-            logger.warning(f"System setting '{key}' not found or inactive. Using default.")
+            logger.debug(f"System setting '{key}' not found or inactive. Using default.")
             return default_value
         except Exception as e:
             logger.error(f"Error retrieving system setting '{key}': {e}")

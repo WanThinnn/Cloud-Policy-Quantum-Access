@@ -2,7 +2,7 @@
 Storage Views - API endpoints for file operations
 """
 from rest_framework import viewsets, status
-from rest_framework.decorators import action, throttle_classes
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
@@ -313,8 +313,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         
         return queryset
     
-    @action(detail=False, methods=['post'])
-    @throttle_classes([CPABEEncryptThrottle])
+    @action(detail=False, methods=['post'], throttle_classes=[CPABEEncryptThrottle])
     @transaction.atomic
     def upload(self, request):
         """
@@ -624,8 +623,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=True, methods=['get'])
-    @throttle_classes([CPABEDecryptThrottle])
+    @action(detail=True, methods=['get'], throttle_classes=[CPABEDecryptThrottle])
     def download(self, request, pk=None):
         """Download file from Supabase Storage"""
         uploaded_file = self.get_object()
@@ -951,8 +949,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=False, methods=['get'])
-    @throttle_classes([CPABEDecryptThrottle])
+    @action(detail=False, methods=['get'], throttle_classes=[CPABEDecryptThrottle])
     def download_by_path(self, request):
         """
         Download file by path from Supabase
@@ -1046,8 +1043,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
             
-    @action(detail=False, methods=['get'])
-    @throttle_classes([CPABEDecryptThrottle])
+    @action(detail=False, methods=['get'], throttle_classes=[CPABEDecryptThrottle])
     def preview_by_path(self, request):
         """
         Preview file by path from Supabase (displays in browser instead of downloading)

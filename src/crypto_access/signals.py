@@ -8,6 +8,7 @@ import hashlib
 import logging
 from django.db.models.signals import post_save, pre_save, pre_delete, post_delete
 from django.dispatch import receiver
+from django.db import transaction
 from django.contrib.auth.models import User
 from .models.settings import SystemSetting
 from .services.setting_service import SettingService
@@ -22,11 +23,11 @@ def get_cache_key_id(user_id, attributes):
 
 
 @receiver(post_save, sender=SystemSetting)
-@receiver(pre_delete, sender=SystemSetting)
+@receiver(post_delete, sender=SystemSetting)
 def invalidate_setting_cache_handler(sender, instance, **kwargs):
     """Invalidate setting cache when a SystemSetting is modified or deleted."""
-    SettingService.invalidate_setting_cache(instance.key)
-    logger.info(f"Invalidated cache for system setting: {instance.key}")
+    key = instance.key
+    transaction.on_commit(lambda: SettingService.invalidate_setting_cache(key), robust=True)
 
 
 @receiver(pre_save, sender=User)

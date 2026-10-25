@@ -44,7 +44,7 @@ logger = logging.getLogger('crypto_access.auth')
 
 # Default WebAuthn settings (configured in settings.py)
 RP_ID = getattr(settings, 'WEBAUTHN_RP_ID', 'localhost')
-RP_NAME = getattr(settings, 'WEBAUTHN_RP_NAME', 'Cloud Policy Crypto Access')
+from ..services.runtime_settings import get_runtime_setting
 ORIGIN = getattr(settings, 'WEBAUTHN_ORIGIN', 'http://localhost:8000')
 
 
@@ -67,7 +67,7 @@ def passkey_register_options(request):
     try:
         options = generate_registration_options(
             rp_id=request.get_host().split(':')[0],
-            rp_name=RP_NAME,
+            rp_name=get_runtime_setting('WEBAUTHN_RP_NAME'),
             user_id=str(user.id).encode('utf-8'),
             user_name=f"{user.username} (Login)",
             user_display_name=f"{getattr(user.profile, 'full_name', user.username) if hasattr(user, 'profile') else user.username} (Login)",

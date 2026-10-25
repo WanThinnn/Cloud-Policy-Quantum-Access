@@ -2,6 +2,7 @@ import clamd
 import os
 import logging
 from io import BytesIO
+from .runtime_settings import get_runtime_setting
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +38,15 @@ class ClamAVService:
         self.cd = None
 
     def _get_client(self):
+        timeout = get_runtime_setting('CLAMAV_TIMEOUT_SECONDS')
+        if self.cd and getattr(self.cd, 'timeout', None) != timeout:
+            self.cd = None
         if not self.cd:
             try:
                 if self.use_tls:
-                    self.cd = ClamdTLSSocket(self.host, self.port, timeout=15.0, ca_certs=self.ca_cert)
+                    self.cd = ClamdTLSSocket(self.host, self.port, timeout=timeout, ca_certs=self.ca_cert)
                 else:
-                    self.cd = clamd.ClamdNetworkSocket(self.host, self.port, timeout=15.0)
+                    self.cd = clamd.ClamdNetworkSocket(self.host, self.port, timeout=timeout)
             except Exception as e:
                 logger.error(f"Failed to connect to ClamAV daemon: {e}")
                 self.cd = None

@@ -120,6 +120,11 @@
                   <li id="system-logs-link" class="hidden">
                     <a href="/manage/audit/" class="block px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-blue-600 dark:hover:text-blue-400">System Logs</a>
                   </li>
+                  {% if request.user.profile.is_super_admin and request.user.profile.is_account_active %}
+                  <li>
+                    <a href="/manage/settings/" class="block px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-blue-600 dark:hover:text-blue-400">System Settings</a>
+                  </li>
+                  {% endif %}
                   <li>
                     <a href="/manage/trash/" class="block px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-red-600 dark:hover:text-red-400">Trash</a>
                   </li>

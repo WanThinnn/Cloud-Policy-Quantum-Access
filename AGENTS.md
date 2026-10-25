@@ -18,6 +18,7 @@
 - Giữ tương thích giữa frontend, serializers, API và backend storage. Dùng factory `crypto_access.services.storage.get_storage_service` thay vì import module `storage_service` cũ.
 
 ## Các ràng buộc cần giữ
+- Cấu hình runtime đi qua allowlist/validation ở `services/runtime_settings.py`; UI `/manage/settings/` chỉ cho profile super_admin active, có CSRF và revision khi ghi. Giữ nguyên credentials/trust bootstrap trong deployment. Secret SMTP phải là write-only với reference tới Vault qua `runtime_secrets.py`; không đưa plaintext vào SystemSetting, cache, form initial, audit hay exception/log. Khi thêm setting phải nối tới consumer thực tế, không chỉ thêm ô giao diện. Xem `docs/vi/runtime-settings.md`.
 
 - Giữ các lớp kiểm tra riêng biệt: authentication/session, quyền ABAC ở ứng dụng, policy file/folder và giải mã bằng CP-ABE. Một lớp cho phép không chứng minh các lớp còn lại cho phép.
 - Kiểm tra thứ tự middleware: JWT trước ABAC; route ABAC cụ thể trước route tổng quát. Trong `check_access`, user không phải superuser cần policy cho phép; không tự khôi phục fallback RBAC từ comment cũ.

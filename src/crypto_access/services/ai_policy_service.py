@@ -8,9 +8,9 @@ import requests
 from django.conf import settings
 from django.core.cache import cache
 from crypto_access.models import AttributeDefinition, UserType
-import os
 logger = logging.getLogger('crypto_access.system')
 from pathlib import Path
+from .runtime_settings import get_runtime_setting
 
 
 prompt_path = settings.BASE_DIR / 'config' / 'prompts' / 'ai_policy_system.md'
@@ -46,10 +46,19 @@ POLICY_OUTPUT_SCHEMA = {
 
 class AIPolicyService:
     def __init__(self):
-        self.base_url = getattr(settings, 'OLLAMA_BASE_URL', 'http://ollama.cyberfortress.local:11434')
-        self.model = getattr(settings, 'OLLAMA_MODEL', 'qwen2.5-coder:3b')
-        self.enabled = getattr(settings, 'AI_FEATURES_ENABLED', False)
         self.ca_cert = getattr(settings, 'OLLAMA_CACERT', False)
+
+    @property
+    def base_url(self):
+        return get_runtime_setting('OLLAMA_BASE_URL').rstrip('/')
+
+    @property
+    def model(self):
+        return get_runtime_setting('OLLAMA_MODEL')
+
+    @property
+    def enabled(self):
+        return get_runtime_setting('AI_FEATURES_ENABLED')
     
     def is_available(self):
         """Check if Ollama service is running and model is loaded."""
@@ -60,7 +69,7 @@ class AIPolicyService:
             if resp.status_code == 200:
                 models = [m['name'] for m in resp.json().get('models', [])]
                 return any(self.model in m for m in models)
-        except requests.ConnectionError:
+        except (requests.RequestException, ValueError):
             return False
         return False
     
@@ -108,7 +117,7 @@ class AIPolicyService:
         system_prompt = self._build_system_prompt(schema)
         
         
-        keep_alive = os.environ.get('OLLAMA_KEEP_ALIVE', '-1')
+        keep_alive = get_runtime_setting('OLLAMA_KEEP_ALIVE')
         try:
             keep_alive = int(keep_alive)
         except ValueError:
@@ -130,7 +139,7 @@ class AIPolicyService:
                     "num_predict": 500   # Limit max tokens to prevent infinite generation
                 }
             },
-            timeout=120,
+            timeout=get_runtime_setting('AI_REQUEST_TIMEOUT_SECONDS'),
             verify=self.ca_cert
         )
         response.raise_for_status()

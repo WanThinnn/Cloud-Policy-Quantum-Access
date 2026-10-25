@@ -86,7 +86,8 @@ class FileUploadSerializer(serializers.Serializer):
     
     def validate_file(self, value):
         """Validate file size and type"""
-        max_size = 10 * 1024 * 1024  # 10MB default
+        from ..services.runtime_settings import get_runtime_setting
+        max_size = get_runtime_setting('UPLOAD_MAX_SIZE_MB') * 1024 * 1024
         if value.size > max_size:
             raise serializers.ValidationError(f"File size cannot exceed {max_size / 1024 / 1024}MB")
         return value

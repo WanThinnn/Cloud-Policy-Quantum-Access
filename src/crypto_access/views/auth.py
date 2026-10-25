@@ -177,11 +177,14 @@ def login(request):
         
         cache_key = f"failed_login_attempts_{username}"
         attempts = cache.get(cache_key, 0)
+        from ..services.runtime_settings import get_runtime_setting
+        max_attempts = get_runtime_setting('LOGIN_MAX_ATTEMPTS')
+        lockout_seconds = get_runtime_setting('LOGIN_LOCKOUT_SECONDS')
         
-        if attempts >= 5:
+        if attempts >= max_attempts:
             logger.warning(f"Login blocked due to too many failed attempts for username: {username}", extra={'user.name': username})
             return Response({
-                'error': 'Account locked temporarily due to too many failed attempts. Please try again in 15 minutes.'
+                'error': 'Account locked temporarily due to too many failed attempts. Please try again later.'
             }, status=status.HTTP_429_TOO_MANY_REQUESTS)
         
         # Check if user account exists and is active BEFORE attempting authentication
@@ -198,7 +201,7 @@ def login(request):
         user = authenticate(username=username, password=password)
         
         if user is None:
-            cache.set(cache_key, attempts + 1, 900)  # Lock for 15 minutes
+            cache.set(cache_key, attempts + 1, lockout_seconds)
             logger.warning(f"Failed login attempt for username: {username} from IP: {get_client_ip(request)}", extra={'user.name': username})
             return Response({
                 'error': 'Invalid credentials'
@@ -238,10 +241,8 @@ def login(request):
         
         # Impossible Travel Check
         # Check SystemSetting for threshold, default 30 mins (1800s)
-        from ..models import SystemSetting
         import json
-        settings_obj = SystemSetting.objects.filter(key='IMPOSSIBLE_TRAVEL_MINUTES').first()
-        threshold_minutes = int(settings_obj.value) if settings_obj and settings_obj.is_active else 30
+        threshold_minutes = get_runtime_setting('IMPOSSIBLE_TRAVEL_MINUTES')
         
         last_session = ActiveSession.objects.filter(user=user, is_active=True).order_by('-last_active').first()
         if last_session and last_session.ip_address and ip_address:

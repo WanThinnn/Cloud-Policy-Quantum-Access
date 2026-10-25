@@ -1,6 +1,6 @@
 # Bối cảnh dự án: Cloud Policy Quantum Access
 
-Đối chiếu mã nguồn ngày 2026-10-25. Đây là bản đồ repository từ việc đọc tĩnh; chưa xác nhận stack chạy được, kết quả test hay tính đúng đắn mật mã bằng thực nghiệm. Các đường dẫn dưới đây tính từ root repository.
+Đối chiếu mã nguồn ngày 2026-10-25. Bản đồ repository kết hợp đọc mã nguồn với những kiểm chứng runtime được nêu rõ bên dưới; không suy rộng các kiểm chứng này thành bảo đảm mọi luồng đã hoạt động hoặc mật mã đúng hoàn toàn. Các đường dẫn dưới đây tính từ root repository.
 
 ## Baseline release và lịch sử tính năng
 
@@ -84,11 +84,18 @@ Mặc dù hashing chia chunk, upload hiện vẫn gọi `file.read()` để lấ
 ## AI Policy Assistant trong 3.0
 
 - Routes: `GET /api/admin/ai/status/`, `POST /api/admin/ai/generate-policy/`. Cả hai yêu cầu `IsAuthenticated` và `IsSuperAdmin`; payload sinh policy có trường `prompt`. Nguồn: `urls/admin.py`, `views/ai_assistant.py` dưới `src/crypto_access/`.
-- Service gửi schema thuộc tính/user types lấy từ DB (cache 300 giây), system prompt trong `src/config/prompts/ai_policy_system.md` và prompt người dùng tới Ollama `/api/chat`. Dùng JSON output schema, temperature 0.1, timeout 120 giây, `OLLAMA_KEEP_ALIVE` default `-1`. Nguồn: `services/ai_policy_service.py`.
+- Service gửi schema thuộc tính/user types lấy từ DB (cache 300 giây), system prompt trong `src/config/prompts/ai_policy_system.md` và prompt người dùng tới Ollama `/api/chat`. Dùng JSON output schema, temperature 0.1; timeout default 120 giây và keep-alive default `-1`, hiện có thể chỉnh qua System Settings. Singleton đọc endpoint/model/feature flag/timeout động thay vì cố định lúc import. Nguồn: `services/ai_policy_service.py`, `services/runtime_settings.py`.
 - Endpoint trả đề xuất gồm condition, CP-ABE policy, resources/action/effect, name/description/priority/explanation và validation; không gọi save để tự tạo `AccessPolicy`. Validation hiện parse AST và thử `_generate_cpabe_policy`, không chứng minh đề xuất đúng ý định/quyền trên dữ liệu thực tế.
 - Thiết kế release dùng LLM local; service thực tế gửi đến `OLLAMA_BASE_URL` cấu hình. Cần xác nhận URL triển khai trước khi khẳng định dữ liệu không rời hệ thống.
 
 ## Cấu hình và hạ tầng
+
+- Trang **System → System Settings**, GET/POST `/manage/settings/`, chỉ dành cho user active có profile `super_admin` còn hiệu lực. Có CSRF, cache-control no-store, revision ký/row lock chống tab cũ ghi đè và audit trong cùng transaction DB. Không có editor tùy ý `.env` hay `SystemSetting`. Nguồn: `views/system_settings.py`, `urls/admin_pages.py`, `templates/admin/system_settings.html`.
+- Catalog runtime quản lý 20 giá trị thường và 1 mật khẩu SMTP: tên passkey, email/SMTP/TLS/timeout, endpoint/model/feature/keep-alive/timeout AI, max upload/timeout scanner/rate upload-download và ngưỡng login/OTP đổi IP. Save lần đầu chốt cả những giá trị đang lấy từ deployment vào DB; GET không seed. Ưu tiên DB active → deployment/default. Phân loại đầy đủ biến được giữ/chuyển: `docs/vi/runtime-settings.md`; validation chung: `services/runtime_settings.py`.
+- Mật khẩu SMTP nhập trên UI là write-only, lưu Vault KV v2 tại path UUID riêng; DB chỉ giữ `_SMTP_PASSWORD_REFERENCE`, audit dùng marker redacted. Không có reference thì dùng mật khẩu deployment; reference có nhưng Vault lỗi thì không fallback cũ. DB rollback có thể để lại secret mới chưa được tham chiếu trong Vault; không tự xóa lịch sử secret. Nguồn: `services/runtime_secrets.py`, `services/email_backend.py`.
+- Cả development/production dùng `RuntimeEmailBackend`, chọn console theo mặc định development và SMTP theo mặc định production; UI có thể override. Nút Test SMTP chỉ kết nối/TLS/login, không gửi mail. Hạ tầng DB/Redis/Vault/storage, crypto flags/trust roots, RP ID/origin và Compose/VPN/tunnel vẫn ở deployment. SMTP và AI endpoint có thể đổi qua UI, chứng chỉ trust vẫn ở deployment.
+- Cache SystemSetting TTL 300 giây, invalidation chạy sau commit bằng post-save/post-delete. Redis chung đồng bộ invalidation giữa worker; locmem nhiều worker có thể giữ giá trị cũ tới TTL. `throttles.py` đọc runtime limits và `views/storage.py` gắn throttle bằng kwargs của `@action`, đã kiểm tra router trả 429 khi vượt mức. UI upload dùng cùng giới hạn với serializer; trang file đã mở cần reload để lấy giá trị mới.
+- Kiểm chứng phần runtime settings: tổng **67 test** trong `security_tests` đã qua ở container với DB/cache/keys cô lập (38 regression cũ và 29 test cấu hình mới); Django system check và Tailwind production build thành công. Đã mở trang HTTPS bằng browser với super_admin và xác nhận liên kết trong menu System. SMTP/Vault credential I/O dùng mock trong test, chưa gửi email thật hoặc thay mật khẩu SMTP triển khai để thử.
 
 - `BASE_DIR` là `src/`; `PROJECT_ROOT` là root repo. `settings/base.py` load `.env` ở root. Dùng `.env.example` làm mẫu, không đọc/chia sẻ secret thật để viết tài liệu.
 - `manage.py` mặc định dùng `config.settings`; package này chọn theo `DJANGO_ENV` (default development). Development dùng `DATABASE_URL` nếu có, nếu không dùng SQLite `src/db.sqlite3`.

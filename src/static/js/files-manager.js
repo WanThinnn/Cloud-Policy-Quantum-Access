@@ -1380,15 +1380,16 @@
 
         const file = fileInput.files[0];
         
-        const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+        const maxFileSizeMB = Number(window.MAX_UPLOAD_SIZE_MB) || 10;
+        const MAX_FILE_SIZE = maxFileSizeMB * 1024 * 1024;
         if (file.size > MAX_FILE_SIZE) {
             const errorContainer = document.getElementById('upload-error-container');
             const errorText = document.getElementById('upload-error-text');
             if (errorContainer && errorText) {
-                errorText.textContent = `File size (${(file.size / 1024 / 1024).toFixed(2)} MB) exceeds the maximum allowed size of 50MB.`;
+                errorText.textContent = `File size (${(file.size / 1024 / 1024).toFixed(2)} MB) exceeds the maximum allowed size of ${maxFileSizeMB}MB.`;
                 errorContainer.classList.remove('hidden');
             } else {
-                showAlert('File size exceeds the maximum allowed size of 50MB.', 'error');
+                showAlert(`File size exceeds the maximum allowed size of ${maxFileSizeMB}MB.`, 'error');
             }
             return;
         }
