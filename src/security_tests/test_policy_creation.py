@@ -15,6 +15,9 @@ class InlinePolicyTests(TestCase):
         # native service. Replace it without introspection before using any patches.
         original_crypto = vars(storage_views)['cpabe_service']
         storage_views.cpabe_service = Mock()
+        storage_views.cpabe_service.encrypt_version.return_value = (b'ciphertext', {
+            'schema': 1, 'scheme': 'ac17', 'format': 'hybrid-v2', 'backend': 'native', 'pqc_signed': False,
+        })
         self.addCleanup(setattr, storage_views, 'cpabe_service', original_crypto)
         self.client = APIClient()
         self.owner = User.objects.create_user(username='owner')
@@ -81,13 +84,13 @@ class InlinePolicyTests(TestCase):
         storage = Mock()
         storage.download_file.return_value = b'data'
         crypto = Mock()
-        crypto.encrypt_buffer.side_effect = RuntimeError('test encryption failure')
+        crypto.encrypt_version.side_effect = RuntimeError('test encryption failure')
         with patch('crypto_access.views.storage.get_storage_service', return_value=storage), patch(
             'crypto_access.views.storage.cpabe_service', crypto
         ):
             response = self.assign(self.admin)
         self.assertEqual(response.status_code, 500)
-        crypto.encrypt_buffer.assert_called_once()
+        crypto.encrypt_version.assert_called_once()
         self.assertFalse(AccessPolicy.objects.exists())
         self.assertFalse(FileAccessPolicy.objects.exists())
 
@@ -117,7 +120,9 @@ class InlinePolicyTests(TestCase):
         storage = Mock()
         storage.create_signed_url.return_value = 'https://example.local/test-only'
         crypto = Mock()
-        crypto.encrypt_buffer.return_value = b'ciphertext'
+        crypto.encrypt_version.return_value = (b'ciphertext', {
+            'schema': 1, 'scheme': 'ac17', 'format': 'hybrid-v2', 'backend': 'native', 'pqc_signed': False,
+        })
         with patch('crypto_access.views.storage.get_storage_service', return_value=storage), patch(
             'crypto_access.views.storage.cpabe_service', crypto
         ), patch(
@@ -137,11 +142,14 @@ class InlinePolicyTests(TestCase):
         storage.create_signed_url.return_value = 'https://example.local/test-only'
         with patch('crypto_access.views.storage.get_storage_service', return_value=storage), patch(
             'crypto_access.views.storage.cpabe_service'
-        ), patch(
+        ) as crypto, patch(
             'crypto_access.services.clamav_service.clamav_service.scan_file_buffer', return_value=(True, 'clean')
         ), patch(
             'crypto_access.views.storage.FileAccessPolicy.objects.create', side_effect=RuntimeError('assignment failure')
         ):
+            crypto.encrypt_version.return_value = (b'ciphertext', {
+                'schema': 1, 'scheme': 'ac17', 'format': 'hybrid-v2', 'backend': 'native', 'pqc_signed': False,
+            })
             response = self.client.post('/api/storage/files/upload/', {
                 **self.inline, 'file_path': 'new.txt', 'file': SimpleUploadedFile('new.txt', b'data'),
             }, format='multipart')

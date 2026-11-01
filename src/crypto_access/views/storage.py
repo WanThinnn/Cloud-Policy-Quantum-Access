@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import APIException, PermissionDenied
 from crypto_access.permissions import IsSuperAdmin
 from django.http import HttpResponse
 from django.utils import timezone
@@ -40,6 +40,9 @@ from ..services.cpabe_service import cpabe_service
 from ..services.casbin_service import casbin_service
 from ..services.tkn20_policy import bypass_attributes
 from ..services.document_access import can_bypass_document_policy, requires_document_policy
+from ..services.version_crypto import (
+    CryptoMetadataError, PLAINTEXT_METADATA, metadata_for_read, persist_verified_metadata,
+)
 from ..throttles import CPABEDecryptThrottle, CPABEEncryptThrottle
 import tempfile
 import time
@@ -129,12 +132,14 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         return policy
     
     def _decrypt_file_if_needed(self, file_data, bucket_name, file_path, user, is_owner=False,
-                                cpabe_policy_str=None, access_action='read'):
+                                cpabe_policy_str=None, access_action='read', file_version=None):
         """Helper to decrypt file if it has a CP-ABE policy"""
         strict = requires_document_policy(user)
         if strict:
             self._require_document_read(user, bucket_name, file_path, access_action)
 
+        if file_version is not None:
+            cpabe_policy_str = file_version.cpabe_policy
         if cpabe_policy_str is not None:
             is_encrypted = bool(cpabe_policy_str)
             policies_to_parse = [cpabe_policy_str] if is_encrypted else []
@@ -143,12 +148,15 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             is_encrypted = any(p.cpabe_policy for p in file_policies)
             policies_to_parse = [p.cpabe_policy for p in file_policies if p.cpabe_policy]
         
-        if not is_encrypted:
+        if not is_encrypted and file_version is None:
             return file_data
-        
-        uploaded_file = get_db_file_by_path(bucket_name, file_path)
         from django.conf import settings
-        abe_scheme = uploaded_file.abe_scheme if uploaded_file else getattr(settings, 'CPABE_SCHEME', 'ac17')
+        backend = 'vault' if getattr(settings, 'USE_VAULT_ABE_PLUGIN', False) else 'native'
+        crypto_metadata, legacy_metadata = metadata_for_read(file_version, file_data, backend=backend)
+        if crypto_metadata['format'] == 'plaintext':
+            persist_verified_metadata(file_version, crypto_metadata)
+            return file_data
+        abe_scheme = crypto_metadata['scheme']
             
         user_attrs = casbin_service.get_user_attributes(user)
         
@@ -183,6 +191,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         if privileged_bypass and abe_scheme == 'tkn20':
             # Old keys may contain silently overwritten duplicate TKN20 labels.
             cache_key = f"cpabe_key_{abe_scheme}_bypass_v2_{user.id}_{attrs_hash}"
+        cache_key += f'_meta_v1_{backend}'
         encrypted_cached_key = cache.get(cache_key)
         
         cached_key_data = None
@@ -222,7 +231,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             try:
                 # Decrypt passing the raw bytes directly (No TempFile)
                 from django.conf import settings
-                if getattr(settings, 'ENABLE_PQC_FEATURES', False):
+                if crypto_metadata['pqc_signed']:
                     decrypted_data = cpabe_service.decrypt_buffer_and_verify(cached_key_data, file_data, scheme=abe_scheme)
                 else:
                     decrypted_data = cpabe_service.decrypt_buffer(cached_key_data, file_data, scheme=abe_scheme)
@@ -230,15 +239,15 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 logger.info(f"CP-ABE Decryption successful for file: {file_path}", extra=extra)
                 # We DO NOT cache decrypted_data for security reasons.
                 # Decrypted data should strictly reside in RAM during the request life cycle.
+                if legacy_metadata:
+                    persist_verified_metadata(file_version, crypto_metadata)
                 return decrypted_data
             except Exception as e:
                 error_msg = str(e)
                 extra = {"user.name": user.username, "user.id": user.id} if user else {}
                 logger.error(f"Decryption failed: {error_msg}", extra=extra)
-                # If the error is about unsupported format (-7 or 101), the file might actually be plaintext
-                if "(-7)" in error_msg or "(-8)" in error_msg or "101" in error_msg or "format" in error_msg.lower():
-                    logger.warning("Assuming file is plaintext due to format error. Returning original data.", extra=extra)
-                    return file_data
+                if legacy_metadata:
+                    raise CryptoMetadataError('Historical crypto metadata could not be verified; recovery is required.')
                 # Otherwise (e.g. -4 Crypto failed), it is a real decryption failure
                 raise Exception("You don't have permission to see this file!")
         except Exception as e:
@@ -510,13 +519,14 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             # Encrypt if policy has cpabe_policy
             from django.conf import settings
             current_scheme = getattr(settings, 'CPABE_SCHEME', 'ac17')
+            crypto_metadata = dict(PLAINTEXT_METADATA)
             if cpabe_policy_str:
                 # Attempt to encrypt with CP-ABE before uploading
                 logger.info(f"Encrypting file with CP-ABE policy: {cpabe_policy_str} (Scheme: {current_scheme})", extra={"user.name": request.user.username, "user.id": request.user.id})
-                if getattr(settings, 'ENABLE_PQC_FEATURES', False):
-                    file_data = cpabe_service.encrypt_buffer_and_sign(plaintext_data, cpabe_policy_str, scheme=current_scheme)
-                else:
-                    file_data = cpabe_service.encrypt_buffer(plaintext_data, cpabe_policy_str, scheme=current_scheme)
+                file_data, crypto_metadata = cpabe_service.encrypt_version(
+                    plaintext_data, cpabe_policy_str, scheme=current_scheme,
+                    pqc_signed=bool(getattr(settings, 'ENABLE_PQC_FEATURES', False)),
+                )
             else:
                 file_data = plaintext_data
 
@@ -602,6 +612,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 physical_path=physical_path,
                 file_size=file.size,
                 cpabe_policy=cpabe_policy_str,
+                crypto_metadata=crypto_metadata,
                 uploaded_by=request.user if request.user.is_authenticated else None,
                 user_signature=user_signature,
                 signer_public_key=signer_key,
@@ -676,6 +687,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 is_owner=is_owner,
                 cpabe_policy_str=cpabe_policy_str,
                 access_action='download',
+                file_version=file_version,
             )
             
             response = HttpResponse(file_data, content_type=uploaded_file.mime_type)
@@ -693,7 +705,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
             return response
             
-        except PermissionDenied:
+        except APIException:
             raise
         except Exception as e:
             return Response(
@@ -732,6 +744,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                     'version_number': v.version_number,
                     'file_size': v.file_size,
                     'cpabe_policy': v.cpabe_policy,
+                    'crypto_metadata': v.crypto_metadata,
                     'uploaded_by': v.uploaded_by.username if v.uploaded_by else 'Unknown',
                     'created_at': v.created_at
                 })
@@ -998,6 +1011,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         try:
             physical_path = file_path
             cpabe_policy_str = None
+            file_version = None
             
             if uploaded_file:
                 if version_param:
@@ -1022,6 +1036,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 is_owner=is_owner,
                 cpabe_policy_str=cpabe_policy_str,
                 access_action='download',
+                file_version=file_version,
             )
             
             file_name = file_path.split('/')[-1]
@@ -1052,7 +1067,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
             return response
             
-        except PermissionDenied:
+        except APIException:
             raise
         except Exception as e:
             return Response(
@@ -1087,6 +1102,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         try:
             physical_path = file_path
             cpabe_policy_str = None
+            file_version = None
             
             if uploaded_file:
                 if version_param:
@@ -1109,7 +1125,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 file_path, 
                 request.user,
                 is_owner=is_owner,
-                cpabe_policy_str=cpabe_policy_str
+                cpabe_policy_str=cpabe_policy_str,
+                file_version=file_version,
             )
             file_name = file_path.split('/')[-1]
             if version_param and file_version and file_version != uploaded_file.get_latest_version():
@@ -1139,7 +1156,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f"inline; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
             return response
             
-        except PermissionDenied:
+        except APIException:
             raise
         except Exception as e:
             return Response(
@@ -1332,7 +1349,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                         
                         while True:
                             try:
-                                storage.copy_file(bucket_name, physical_path_to_use, new_physical_path, user=request.user)
+                                storage.copy_file(bucket_name, physical_path_to_use, new_physical_path)
                                 break
                             except Exception as e:
                                 if 'Duplicate' in str(e) or 'already exists' in str(e):
@@ -1351,6 +1368,9 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                         new_file.file_path_hash = compute_hash(new_file_path)
                         new_file.file_name_hash = compute_hash(new_file_name)
                         new_file.uploaded_by = request.user
+                        if latest_version:
+                            new_file.file_size = latest_version.file_size
+                            new_file.abe_scheme = latest_version.crypto_metadata.get('scheme') or db_file.abe_scheme
                         new_file.save()
                         
                         # Copy latest version
@@ -1369,7 +1389,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                             new_policy_link = FileAccessPolicy.objects.create(
                                 uploaded_file=new_file,
                                 policy=policy_link.policy,
-                                is_active=policy_link.is_active,
+                                bucket=bucket,
+                                target_type=policy_link.target_type,
                                 assigned_by=policy_link.assigned_by,
                                 notes=policy_link.notes
                             )
@@ -1831,7 +1852,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                     file_data = storage.download_file(bucket_name, physical_path, user=request.user)
                     if was_already_encrypted:
                         file_data = self._decrypt_file_if_needed(
-                            file_data, bucket_name, file_path, request.user, is_owner=True, cpabe_policy_str=cpabe_policy_str
+                            file_data, bucket_name, file_path, request.user, is_owner=True, cpabe_policy_str=cpabe_policy_str, file_version=latest_version,
                         )
                     
                     # Delete old policies
@@ -1854,7 +1875,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                             # Decrypt existing file data first
                             enc_data = storage.download_file(bucket_name, physical_path, user=request.user)
                             file_data = self._decrypt_file_if_needed(
-                                enc_data, bucket_name, file_path, request.user, is_owner=True, cpabe_policy_str=cpabe_policy_str
+                                enc_data, bucket_name, file_path, request.user, is_owner=True, cpabe_policy_str=cpabe_policy_str, file_version=latest_version,
                             )
                         else:
                             file_data = storage.download_file(bucket_name, physical_path, user=request.user)
@@ -1867,7 +1888,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                     old_physical_path = physical_path
                     base, ext = os.path.splitext(physical_path)
                     base_no_v = base.split('_v')[0]
-                    new_physical_path = f"{base_no_v}_v{int(time.time())}{ext}"
+                    new_physical_path = f"{base_no_v}_v{uuid.uuid4().hex}{ext}"
                     physical_path = new_physical_path
 
                 # Create the assignment
@@ -1881,64 +1902,42 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 )
                 
                 if needs_encryption_update:
+                    from django.conf import settings
                     if policy_to_encrypt:
-                        # Encrypt plaintext
-                        logger.info(f"Encrypting file {physical_path} with policy: {policy_to_encrypt}")
-                        try:
-                            from django.conf import settings
-                            current_scheme = getattr(settings, 'CPABE_SCHEME', 'ac17')
-                            if getattr(settings, 'ENABLE_PQC_FEATURES', False):
-                                enc_data = cpabe_service.encrypt_buffer_and_sign(file_data, policy_to_encrypt, scheme=current_scheme)
-                            else:
-                                enc_data = cpabe_service.encrypt_buffer(file_data, policy_to_encrypt, scheme=current_scheme)
-                            
-                            storage.upload_file(
-                                bucket_name=bucket_name,
-                                file_path=physical_path,
-                                file_data=enc_data,
-                                content_type=file_record.mime_type or 'application/octet-stream',
-                                upsert=True,
-                                user=request.user
-                            )
-                            # Update FileVersion cpabe_policy and physical_path
-                            file_record.abe_scheme = current_scheme
-                            file_record.save(update_fields=['abe_scheme'])
-                            if latest_version:
-                                latest_version.cpabe_policy = policy_to_encrypt
-                                if physical_path != old_physical_path:
-                                    latest_version.physical_path = physical_path
-                                    latest_version.save(update_fields=['cpabe_policy', 'physical_path'])
-                                    try:
-                                        storage.delete_file(bucket_name, old_physical_path)
-                                    except Exception as e:
-                                        logger.warning(f"Could not delete old file {old_physical_path}: {e}")
-                                else:
-                                    latest_version.save(update_fields=['cpabe_policy'])
-                        except Exception as e:
-                            logger.error(f"Failed to encrypt file data during policy assignment: {e}")
-                            raise
-                    elif replace_policies:
-                        # Policy has no CP-ABE, and we are replacing -> Upload plaintext
-                        logger.info(f"Removing encryption for file {physical_path}")
-                        storage.upload_file(
-                            bucket_name=bucket_name,
-                            file_path=physical_path,
-                            file_data=file_data,
-                            content_type=file_record.mime_type or 'application/octet-stream',
-                            upsert=True,
-                            user=request.user
+                        current_scheme = getattr(settings, 'CPABE_SCHEME', 'ac17')
+                        enc_data, crypto_metadata = cpabe_service.encrypt_version(
+                            file_data, policy_to_encrypt, scheme=current_scheme,
+                            pqc_signed=bool(getattr(settings, 'ENABLE_PQC_FEATURES', False)),
                         )
-                        if latest_version:
-                            latest_version.cpabe_policy = ''
-                            if physical_path != old_physical_path:
-                                latest_version.physical_path = physical_path
-                                latest_version.save(update_fields=['cpabe_policy', 'physical_path'])
-                                try:
-                                    storage.delete_file(bucket_name, old_physical_path)
-                                except Exception as e:
-                                    logger.warning(f"Could not delete old file {old_physical_path}: {e}")
-                            else:
-                                latest_version.save(update_fields=['cpabe_policy'])
+                    else:
+                        enc_data, crypto_metadata = file_data, dict(PLAINTEXT_METADATA)
+                        current_scheme = 'ac17'
+                    storage.upload_file(
+                        bucket_name=bucket_name, file_path=physical_path, file_data=enc_data,
+                        content_type=file_record.mime_type or 'application/octet-stream',
+                        upsert=False, user=request.user,
+                    )
+                    # Re-encryption is a new immutable version. Keep every old blob and
+                    # its crypto metadata, including legacy sources whose mode is unknown.
+                    if latest_version is None:
+                        latest_version = FileVersion.objects.create(
+                            file=file_record, version_number=1, physical_path=old_physical_path,
+                            file_size=file_record.file_size, cpabe_policy=cpabe_policy_str,
+                            uploaded_by=file_record.uploaded_by,
+                        )
+                    FileVersion.objects.create(
+                        file=file_record, version_number=latest_version.version_number + 1,
+                        physical_path=physical_path, file_size=file_record.file_size,
+                        cpabe_policy=policy_to_encrypt or '', crypto_metadata=crypto_metadata,
+                        uploaded_by=request.user, user_signature=latest_version.user_signature,
+                        signer_public_key=latest_version.signer_public_key,
+                        trusted_timestamp=latest_version.trusted_timestamp, tsa_signature=latest_version.tsa_signature,
+                    )
+                    file_record.abe_scheme = current_scheme
+                    file_record.save(update_fields=['abe_scheme'])
+            except APIException:
+                transaction.set_rollback(True)
+                raise
             except Exception as e:
                 transaction.set_rollback(True)
                 logger.error(f"Failed to update encryption for file {file_path}: {e}")

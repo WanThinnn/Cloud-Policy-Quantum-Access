@@ -1,4 +1,5 @@
 from pathlib import Path
+import struct
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -94,8 +95,12 @@ class TKN20DecryptionBypassTests(SimpleTestCase):
             storage_views.cache, 'set'
         ) as cache_set, patch('crypto_access.models.fields.encrypt_bytes', return_value=b'wrapped-test-key'):
             result = storage_views.UploadedFileViewSet()._decrypt_file_if_needed(
-                b'test-ciphertext', 'documents', 'test.txt', user,
+                bytes([2, 1 if scheme == 'tkn20' else 0]) + b'0' * 12 + struct.pack('<Q', 1) + b'A' + b'0' * 16,
+                'documents', 'test.txt', user,
                 is_owner=owner, cpabe_policy_str='user_type:data_owner',
+                file_version=SimpleNamespace(cpabe_policy='user_type:data_owner', crypto_metadata={
+                    'schema': 1, 'scheme': scheme, 'format': 'hybrid-v2', 'backend': 'native', 'pqc_signed': False,
+                }),
             )
         return result, cache_set.call_args.args[0]
 

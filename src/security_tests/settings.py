@@ -19,7 +19,10 @@ USE_TZ = True
 ALLOWED_HOSTS = ['testserver']
 ROOT_URLCONF = 'security_tests.urls'
 MIDDLEWARE = []
-INSTALLED_APPS = ['django.contrib.auth', 'django.contrib.contenttypes', 'crypto_access']
+INSTALLED_APPS = [
+    'django.contrib.auth', 'django.contrib.contenttypes',
+    'rest_framework_simplejwt.token_blacklist', 'crypto_access',
+]
 DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}
 MIGRATION_MODULES = {'crypto_access': None}
 CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}

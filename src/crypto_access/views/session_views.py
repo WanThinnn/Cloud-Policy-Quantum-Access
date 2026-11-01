@@ -4,6 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import render
 from ..models import ActiveSession
+from ..services.session_service import session_key
 from ..serializers.session import ActiveSessionSerializer
 
 class SessionViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
@@ -19,16 +20,8 @@ class SessionViewSet(viewsets.GenericViewSet, mixins.ListModelMixin):
     @action(detail=False, methods=['post'])
     def revoke_all(self, request):
         """Revoke all sessions except the current one"""
-        access_token = request.COOKIES.get('access_token') or request.META.get('HTTP_AUTHORIZATION', '').replace('Bearer ', '')
-        current_jti = None
-        if access_token:
-            try:
-                from rest_framework_simplejwt.tokens import AccessToken
-                access_obj = AccessToken(access_token)
-                current_jti = access_obj.get('jti')
-            except Exception:
-                pass
-                
+        current_jti = session_key(request.auth) if request.auth is not None else None
+
         qs = ActiveSession.objects.filter(user=request.user, is_active=True)
         if current_jti:
             qs = qs.exclude(session_key=current_jti)

@@ -4,7 +4,7 @@ Implements WebAuthn server-side authentication for login.
 """
 
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth.models import User
@@ -30,7 +30,7 @@ from webauthn.helpers.structs import (
     AuthenticationCredential,
     PublicKeyCredentialDescriptor,
 )
-from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
+from ..services.session_service import issue_session_tokens, set_auth_cookies
 from django.utils import timezone
 from django.core.cache import cache
 import uuid
@@ -146,6 +146,7 @@ def passkey_register_complete(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 def passkey_login_options(request):
     """
     Generate authentication options for login.
@@ -194,6 +195,7 @@ def passkey_login_options(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 def passkey_login_complete(request):
     """
     Verify the assertion response and log the user in.
@@ -251,9 +253,6 @@ def passkey_login_complete(request):
         logger.info(f"Passkey login successful: {user.username} from IP: {ip_address}")
         
         # Issue JWT tokens (similar to password login)
-        refresh = RefreshToken.for_user(user)
-        access_token = str(refresh.access_token)
-        refresh_token = str(refresh)
         
         user_agent_str = request.META.get('HTTP_USER_AGENT', '')
         
@@ -271,37 +270,17 @@ def passkey_login_complete(request):
         elif "Android" in user_agent_str: os_name = "Android"
         elif "iPhone" in user_agent_str or "iPad" in user_agent_str: os_name = "iOS"
         
-        # Extract JTI from token to use as session key
-        try:
-            access_obj = AccessToken(access_token)
-            session_key = access_obj.get('jti', str(uuid.uuid4()))
-        except Exception:
-            session_key = str(uuid.uuid4())
-            
-        ActiveSession.objects.create(
-            user=user,
-            session_key=session_key,
-            ip_address=ip_address,
-            browser=browser,
-            os_name=os_name,
-            device_name=user_agent_str[:200]
+        access_token, refresh_token = issue_session_tokens(
+            user, ip_address=ip_address, browser=browser, os_name=os_name, device_name=user_agent_str[:200],
         )
-        
+
         response = Response({
             'message': 'Login successful',
             'user': UserDetailSerializer(user).data
         })
         
         # Set HttpOnly cookies
-        is_secure = getattr(settings, 'SESSION_COOKIE_SECURE', False)
-        response.set_cookie(
-            'access_token', access_token,
-            max_age=3600, httponly=True, samesite='Lax', secure=is_secure
-        )
-        response.set_cookie(
-            'refresh_token', refresh_token,
-            max_age=7*24*3600, httponly=True, samesite='Lax', secure=is_secure
-        )
+        set_auth_cookies(response, access_token, refresh_token)
         
         return response
         

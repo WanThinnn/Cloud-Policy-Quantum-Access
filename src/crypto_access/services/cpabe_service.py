@@ -201,9 +201,15 @@ class CPABEService:
         has_vault_keys = cpabe_msk_b64 and cpabe_pk_b64
         has_backup_keys = os.path.exists(backup_msk) and os.path.exists(backup_pk)
         
-        if is_pqc_enabled:
-            has_vault_keys = has_vault_keys and pqc_sk_b64 and pqc_pk_b64
-            has_backup_keys = has_backup_keys and os.path.exists(backup_pqc_sk) and os.path.exists(backup_pqc_pk)
+        # A feature-flag change must never make existing ABE keys look absent.
+        # Load existing signing material independently; missing PQC keys are an
+        # explicit signing error, not permission to regenerate an ABE master key.
+        self.pqc_sk_data = base64.b64decode(pqc_sk_b64) if pqc_sk_b64 else None
+        self.pqc_pk_data = base64.b64decode(pqc_pk_b64) if pqc_pk_b64 else None
+        for attribute, path in (('pqc_sk_data', backup_pqc_sk), ('pqc_pk_data', backup_pqc_pk)):
+            if getattr(self, attribute) is None and os.path.isfile(path):
+                with open(path, 'rb') as stream:
+                    setattr(self, attribute, stream.read())
 
         # Split-brain check: Mismatch between Vault and Local Backup
         if has_vault_keys and has_backup_keys:
@@ -219,9 +225,6 @@ class CPABEService:
             logger.info("CP-ABE keys fetched from Vault (matches local backup).")
             self.msk_data = vault_msk
             self.pk_data = base64.b64decode(cpabe_pk_b64)
-            if is_pqc_enabled:
-                self.pqc_sk_data = base64.b64decode(pqc_sk_b64)
-                self.pqc_pk_data = base64.b64decode(pqc_pk_b64)
             return
 
         # Vault has keys, but no backup exists
@@ -229,10 +232,8 @@ class CPABEService:
             logger.info("CP-ABE keys fetched from Vault. Saving new local backup...")
             self.msk_data = base64.b64decode(cpabe_msk_b64)
             self.pk_data = base64.b64decode(cpabe_pk_b64)
-            if is_pqc_enabled:
-                self.pqc_sk_data = base64.b64decode(pqc_sk_b64)
-                self.pqc_pk_data = base64.b64decode(pqc_pk_b64)
-            self._save_backup(backup_dir, backup_msk, backup_pk, backup_pqc_sk, backup_pqc_pk, is_pqc_enabled)
+            self._save_backup(backup_dir, backup_msk, backup_pk, backup_pqc_sk, backup_pqc_pk,
+                              bool(self.pqc_sk_data and self.pqc_pk_data))
             return
 
         # Backup has keys, but Vault is empty
@@ -245,14 +246,10 @@ class CPABEService:
             vault_service.put_secret('CPABE_MSK', base64.b64encode(self.msk_data).decode('utf-8'))
             vault_service.put_secret('CPABE_PK', base64.b64encode(self.pk_data).decode('utf-8'))
             
-            if is_pqc_enabled:
-                with open(backup_pqc_sk, 'rb') as f:
-                    self.pqc_sk_data = f.read()
-                with open(backup_pqc_pk, 'rb') as f:
-                    self.pqc_pk_data = f.read()
+            if self.pqc_sk_data and self.pqc_pk_data:
                 vault_service.put_secret('PQC_SK', base64.b64encode(self.pqc_sk_data).decode('utf-8'))
                 vault_service.put_secret('PQC_PK', base64.b64encode(self.pqc_pk_data).decode('utf-8'))
-                
+
             logger.info("CP-ABE keys restored to Vault from local backup.")
             return
 
@@ -469,6 +466,37 @@ class CPABEService:
             return self._lib.getVersion().decode('utf-8')
         return "Unknown"
 
+    def encrypt_version(self, plaintext: bytes, policy: str, scheme: str, pqc_signed: bool):
+        """Return ciphertext and actual crypto metadata from the encryption boundary."""
+        from .version_crypto import inspect_header, validate_metadata
+        if self.use_vault_plugin:
+            public_key = vault_service.get_secret(f'CPABE_PK_{scheme.upper()}')
+            if not public_key:
+                raise CPABEError('Public key for the requested scheme is unavailable.')
+            response = requests.put(
+                f'{vault_service.get_addr}/v1/abe_{scheme}/encrypt',
+                headers={'X-Vault-Token': vault_service.get_token},
+                json={'scheme': scheme, 'plaintext': base64.b64encode(plaintext).decode('ascii'),
+                      'policy': policy, 'public_key': public_key, 'sign': pqc_signed},
+                verify=self._vault_verify, timeout=120,
+            )
+            response.raise_for_status()
+            result = response.json()['data']
+            if 'crypto_metadata' not in result:
+                raise CPABEError('Vault ABE plugin must be upgraded to return per-version crypto metadata.')
+            data = base64.b64decode(result['ciphertext'], validate=True)
+            metadata = validate_metadata(result['crypto_metadata'])
+        else:
+            operation = self.encrypt_buffer_and_sign if pqc_signed else self.encrypt_buffer
+            data = operation(plaintext, policy, scheme=scheme)
+            metadata = {'schema': 1, **inspect_header(data), 'pqc_signed': pqc_signed, 'backend': 'native'}
+        header = inspect_header(data)
+        if (metadata['scheme'] != scheme or metadata['pqc_signed'] != pqc_signed or
+                metadata['backend'] != ('vault' if self.use_vault_plugin else 'native') or
+                any(metadata[key] != header[key] for key in ('scheme', 'format'))):
+            raise CPABEError('Encryption result does not match the requested crypto mode.')
+        return data, metadata
+
     def encrypt_buffer(self, plaintext: bytes, policy: str, scheme: str = None) -> bytes:
         """Encrypt data buffer directly in memory"""
         if scheme is None:
@@ -599,6 +627,8 @@ class CPABEService:
             raise CPABEError("PQC encryptBuffer_and_sign function not found in DLL")
 
         pk_json = base64.b64decode(self.pk_data)
+        if not getattr(self, 'pqc_sk_data', None):
+            raise CPABEError('PQC signing keys are unavailable; existing ABE keys were preserved.')
         pqc_sk_json = base64.b64decode(self.pqc_sk_data)
         
         pk_ptr = ctypes.cast(ctypes.create_string_buffer(pk_json), ctypes.POINTER(ctypes.c_ubyte))
@@ -627,13 +657,14 @@ class CPABEService:
         return ciphertext
 
     def decrypt_buffer_and_verify(self, sk_data: bytes, ciphertext: bytes, scheme: str = None) -> bytes:
-        self._ensure_keys_exist()
         if scheme is None:
             scheme = getattr(settings, 'CPABE_SCHEME', 'ac17')
         
         if self.use_vault_plugin:
             headers = {"X-Vault-Token": vault_service.get_token, "Content-Type": "application/json"}
-            pqc_pk_b64 = vault_service.get_secret(f'PQC_PK_{scheme.upper()}') or base64.b64encode(self.pqc_pk_data).decode('utf-8')
+            pqc_pk_b64 = vault_service.get_secret(f'PQC_PK_{scheme.upper()}')
+            if not pqc_pk_b64:
+                raise CPABEError('The verification key for this version is unavailable.')
             pk_b64 = vault_service.get_secret(f'CPABE_PK_{scheme.upper()}') or base64.b64encode(self.pk_data).decode('utf-8')
             
             payload = {
@@ -658,6 +689,8 @@ class CPABEService:
             raise CPABEError("PQC decryptBuffer_and_verify function not found in DLL")
 
         sk_json = base64.b64decode(sk_data)
+        if not getattr(self, 'pqc_pk_data', None):
+            raise CPABEError('The verification key for this version is unavailable.')
         pqc_pk_json = base64.b64decode(self.pqc_pk_data)
 
         sk_ptr = ctypes.cast(ctypes.create_string_buffer(sk_json), ctypes.POINTER(ctypes.c_ubyte))

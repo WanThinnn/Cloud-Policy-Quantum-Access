@@ -9,6 +9,8 @@ class ActiveSession(BaseModel):
     """
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='active_sessions')
     session_key = models.CharField(max_length=255, unique=True, help_text="JWT Token JTI (ID)")
+    refresh_jti = models.CharField(max_length=255, null=True, blank=True, unique=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
     
     # Device info
     device_name = models.CharField(max_length=255, blank=True, null=True, help_text="e.g. Windows PC, iPhone 13")

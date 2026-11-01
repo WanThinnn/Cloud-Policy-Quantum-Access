@@ -147,6 +147,7 @@ class FileVersion(models.Model):
     physical_path = models.CharField(max_length=500, help_text="Actual path in storage (e.g. docs/report_v2.pdf)")
     file_size = models.BigIntegerField(help_text="File size in bytes")
     cpabe_policy = models.TextField(blank=True, null=True, help_text="CP-ABE policy string used to encrypt this specific version")
+    crypto_metadata = models.JSONField(default=dict, blank=True)
     uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     

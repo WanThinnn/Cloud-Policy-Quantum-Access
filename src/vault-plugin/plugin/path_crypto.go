@@ -46,6 +46,11 @@ func pathEncrypt(b *abeBackend) *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Base64 encoded PQC ML-DSA Secret Key for signing (optional)",
 			},
+			"sign": {
+				Type: framework.TypeBool,
+				Default: true,
+				Description: "Sign this ciphertext. Defaults to legacy auto-signing behavior when omitted.",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
@@ -129,7 +134,10 @@ func (b *abeBackend) pathEncryptWrite(ctx context.Context, req *logical.Request,
 	var res C.int
 
 	var pqcSkBytes []byte
-	if pqcSkBase64 == "" {
+	if !data.Get("sign").(bool) {
+		// Explicit unsigned mode is required for reliable per-version signature metadata.
+		pqcSkBytes = nil
+	} else if pqcSkBase64 == "" {
 		storageEntry, err := req.Storage.Get(ctx, "msk/pqc")
 		if err == nil && storageEntry != nil {
 			pqcSkBytes = storageEntry.Value
@@ -142,6 +150,9 @@ func (b *abeBackend) pathEncryptWrite(ctx context.Context, req *logical.Request,
 		}
 	}
 
+	if _, explicit := data.Raw["sign"]; explicit && data.Get("sign").(bool) && len(pqcSkBytes) == 0 {
+		return logical.ErrorResponse("PQC signing requested but no signing key is available"), nil
+	}
 	if len(pqcSkBytes) > 0 {
 		cPqcSk := (*C.uchar)(C.CBytes(pqcSkBytes))
 		defer C.free(unsafe.Pointer(cPqcSk))
@@ -178,6 +189,13 @@ func (b *abeBackend) pathEncryptWrite(ctx context.Context, req *logical.Request,
 	return &logical.Response{
 		Data: map[string]interface{}{
 			"ciphertext": ctBase64,
+			"crypto_metadata": map[string]interface{}{
+				"schema": 1,
+				"scheme": schemeStr,
+				"format": fmt.Sprintf("hybrid-v%d", ctBytes[0]),
+				"pqc_signed": len(pqcSkBytes) > 0,
+				"backend": "vault",
+			},
 		},
 	}, nil
 }

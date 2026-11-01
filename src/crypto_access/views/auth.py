@@ -3,11 +3,10 @@ Authentication Views - Registration, Login, Password Management
 """
 from django.contrib.auth.decorators import login_required
 from rest_framework import status, generics
-from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes, authentication_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
-from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.utils import timezone
@@ -18,7 +17,6 @@ from datetime import timedelta
 import secrets
 import logging
 import uuid
-from rest_framework_simplejwt.tokens import AccessToken
 
 logger = logging.getLogger('crypto_access.auth')
 
@@ -37,6 +35,7 @@ from ..serializers import (
     VerifyOTPSerializer,
 )
 from ..models import UserProfile, ActiveSession, AccessLog
+from ..services.session_service import issue_session_tokens, session_key, set_auth_cookies
 
 def get_client_ip(request):
     x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
@@ -77,6 +76,7 @@ def manage_keys_page(request):
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 @throttle_classes([AuthRateThrottle])
 def register(request):
     """
@@ -99,9 +99,7 @@ def register(request):
         user = serializer.save()
         
         # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
-        access_token = str(refresh.access_token)
-        refresh_token = str(refresh)
+        access_token, refresh_token = issue_session_tokens(user, ip_address=get_client_ip(request))
         
         logger.info(f"User registered successfully: {user.username} ({user.email})", extra={'user.name': user.username, 'user.id': user.id})
         
@@ -116,15 +114,7 @@ def register(request):
         }, status=status.HTTP_201_CREATED)
         
         # Set HttpOnly cookies
-        is_secure = getattr(settings, 'SESSION_COOKIE_SECURE', False)
-        response.set_cookie(
-            'access_token', access_token,
-            max_age=3600, httponly=True, samesite='Lax', secure=is_secure
-        )
-        response.set_cookie(
-            'refresh_token', refresh_token,
-            max_age=7*24*3600, httponly=True, samesite='Lax', secure=is_secure
-        )
+        set_auth_cookies(response, access_token, refresh_token)
         
         return response
     
@@ -133,6 +123,7 @@ def register(request):
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 def vpn_auth_verify(request):
     """
     Verify username and password for OpenVPN auth-user-pass
@@ -155,6 +146,7 @@ def vpn_auth_verify(request):
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 @throttle_classes([AuthRateThrottle])
 def login(request):
     """
@@ -218,9 +210,6 @@ def login(request):
                 }, status=status.HTTP_403_FORBIDDEN)
         
         # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
-        access_token = str(refresh.access_token)
-        refresh_token = str(refresh)
         
         # --- Session Management & Impossible Travel ---
         ip_address = get_client_ip(request)
@@ -304,37 +293,17 @@ def login(request):
                             'temp_token': temp_token
                         }, status=status.HTTP_202_ACCEPTED)
         
-        # Extract JTI from token to use as session key
-        try:
-            access_obj = AccessToken(access_token)
-            session_key = access_obj.get('jti', str(uuid.uuid4()))
-        except Exception:
-            session_key = str(uuid.uuid4())
-            
-        ActiveSession.objects.create(
-            user=user,
-            session_key=session_key,
-            ip_address=ip_address,
-            browser=browser,
-            os_name=os_name,
-            device_name=user_agent_str[:200]
+        access_token, refresh_token = issue_session_tokens(
+            user, ip_address=ip_address, browser=browser, os_name=os_name, device_name=user_agent_str[:200],
         )
-        
+
         response = Response({
             'message': 'Login successful',
             'user': UserDetailSerializer(user).data
         })
         
         # Set HttpOnly cookies
-        is_secure = getattr(settings, 'SESSION_COOKIE_SECURE', False)
-        response.set_cookie(
-            'access_token', access_token,
-            max_age=3600, httponly=True, samesite='Lax', secure=is_secure
-        )
-        response.set_cookie(
-            'refresh_token', refresh_token,
-            max_age=7*24*3600, httponly=True, samesite='Lax', secure=is_secure
-        )
+        set_auth_cookies(response, access_token, refresh_token)
         
         return response
     
@@ -343,6 +312,7 @@ def login(request):
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 @throttle_classes([AuthRateThrottle])
 def verify_otp(request):
     """
@@ -397,42 +367,18 @@ def verify_otp(request):
             error_message=f"OTP verification successful for IP: {cached_data['ip_address']}"
         )
         
-        # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
-        access_token = str(refresh.access_token)
-        refresh_token = str(refresh)
-        
-        # Session key
-        try:
-            access_obj = AccessToken(access_token)
-            session_key = access_obj.get('jti', str(uuid.uuid4()))
-        except Exception:
-            session_key = str(uuid.uuid4())
-            
-        ActiveSession.objects.create(
-            user=user,
-            session_key=session_key,
-            ip_address=cached_data['ip_address'],
-            browser=cached_data['browser'],
-            os_name=cached_data['os_name'],
-            device_name=cached_data['user_agent_str'][:200]
+        access_token, refresh_token = issue_session_tokens(
+            user, ip_address=cached_data['ip_address'], browser=cached_data['browser'],
+            os_name=cached_data['os_name'], device_name=cached_data['user_agent_str'][:200],
         )
-        
+
         response = Response({
             'message': 'Login successful',
             'user': UserDetailSerializer(user).data
         })
         
         # Set HttpOnly cookies
-        is_secure = getattr(settings, 'SESSION_COOKIE_SECURE', False)
-        response.set_cookie(
-            'access_token', access_token,
-            max_age=3600, httponly=True, samesite='Lax', secure=is_secure
-        )
-        response.set_cookie(
-            'refresh_token', refresh_token,
-            max_age=7*24*3600, httponly=True, samesite='Lax', secure=is_secure
-        )
+        set_auth_cookies(response, access_token, refresh_token)
         
         return response
         
@@ -441,52 +387,16 @@ def verify_otp(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout(request):
-    """
-    Logout user (blacklist refresh token)
-    
-    POST /api/auth/logout/
-    Body:
-    {
-        "refresh": "<refresh_token>"
-    }
-    """
-    try:
-        refresh_token = request.COOKIES.get('refresh_token') or request.data.get('refresh')
-        access_token = request.COOKIES.get('access_token') or request.META.get('HTTP_AUTHORIZATION', '').replace('Bearer ', '')
-        
-        if refresh_token:
-            token = RefreshToken(refresh_token)
-            token.blacklist()
-            
-        # Revoke Active Session
-        if access_token:
-            try:
-                access_obj = AccessToken(access_token)
-                session_key = access_obj.get('jti')
-                if session_key:
-                    ActiveSession.objects.filter(session_key=session_key).update(is_active=False)
-            except Exception as e:
-                logger.warning(f"Failed to extract jti on logout: {e}")
-            
-        response = Response({
-            'message': 'Logout successful'
-        }, status=status.HTTP_200_OK)
-        
-        # Delete cookies
-        response.delete_cookie('access_token')
-        response.delete_cookie('refresh_token')
-        
-        logger.info(f"User logged out: {request.user.username}", extra={'user.name': request.user.username, 'user.id': request.user.id})
-        
-        return response
-        
-    except Exception as e:
-        response = Response({
-            'error': str(e)
-        }, status=status.HTTP_400_BAD_REQUEST)
-        response.delete_cookie('access_token')
-        response.delete_cookie('refresh_token')
-        return response
+    """Revoke the authenticated session, including every access/refresh token bound to it."""
+    if request.auth is not None:
+        ActiveSession.objects.filter(
+            user=request.user, session_key=session_key(request.auth),
+        ).update(is_active=False)
+    response = Response({'message': 'Logout successful'})
+    response.delete_cookie('access_token')
+    response.delete_cookie('refresh_token')
+    return response
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -526,6 +436,7 @@ def change_password(request):
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 @throttle_classes([AuthRateThrottle])
 def password_reset_request(request):
     """
@@ -572,6 +483,7 @@ def password_reset_request(request):
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@authentication_classes([])
 def password_reset_confirm(request):
     """
     Confirm password reset with token

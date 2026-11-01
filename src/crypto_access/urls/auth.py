@@ -3,7 +3,7 @@ Authentication URLs
 """
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView
+from ..views.token_refresh import SessionTokenRefreshView
 from ..views import (
     auth, 
     SessionViewSet, 
@@ -35,7 +35,7 @@ urlpatterns = [
     path('vpn_verify/', auth.vpn_auth_verify, name='vpn_auth_verify'),
     
     # JWT Token refresh
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('token/refresh/', SessionTokenRefreshView.as_view(), name='token_refresh'),
     
     # Password Management
     path('change-password/', auth.change_password, name='change_password'),
