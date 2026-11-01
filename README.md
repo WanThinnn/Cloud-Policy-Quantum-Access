@@ -20,7 +20,7 @@ See more demo images in `img/`.
 
 ### Key Features
 
-- **Hybrid PQ-CP-ABE Encryption (v4.0.0)**: Advanced attribute-based encryption utilizing high-speed in-memory buffers (RAM) for encryption/decryption, completely bypassing disk I/O bottlenecks. See more at: https://github.com/WanThinnn/Hybrid-CP-ABE-Library/tree/hybrid-pq-cp-abe 
+- **Hybrid PQ-CP-ABE Encryption**: Native cryptography and the Vault plugin are built together from the latest [Hybrid-PQ-CP-ABE-Library source](https://github.com/WanThinnn/Hybrid-PQ-CP-ABE-Library).
 - **HashiCorp Vault Integration (Envelope Encryption)**: Enterprise-grade key management. Vault secures the CP-ABE Master Keys and dynamically wraps per-file Data Encryption Keys (DEK), ensuring keys are never leaked to the disk.
 - **Multi-Storage Backend Integration**: Seamlessly supports **Supabase Storage**, **AWS S3 / MinIO**, **Google Cloud Storage (GCS)**, and **Local File System** for hosting encrypted files, alongside **Supabase PostgreSQL** or **Local PostgreSQL** (with Smart SSL Bypass) for high-performance metadata management. Smart auto-bucket creation ensures bullet-proof reliability across environments.
 - **Multi-Layer Security**: Combines **HashiCorp Vault**, **CP-ABE AC17**, and **AES-GCM-256** (Mathematical Cryptography) with **Casbin ABAC** (Application-level Access Control) for defense-in-depth.
@@ -55,7 +55,7 @@ See more demo images in `img/`.
 
 ### Security & Cryptography
 - **Key Management**: HashiCorp Vault
-- **Hybrid CP-ABE & PQC**: Custom C++ `libhybrid-pq-cp-abe` (v4.0.0) bridged via Python `ctypes`
+- **Hybrid CP-ABE & PQC**: C++ `libhybrid-pq-cp-abe`, consumed through Python `ctypes` or the matching Vault plugin
 - **Access Control**: PyCasbin (Attribute-Based Access Control)
 - **Authentication**: JWT (JSON Web Tokens)
 
@@ -128,7 +128,12 @@ git clone https://github.com/WanThinnn/Cloud-Policy-Quantum-Access.git
 cd Cloud-Policy-Quantum-Access
 
 ```
-*Note: The required C++ cryptography library (`libhybrid-cp-abe` v4.0.0) is already included in the `src/lib/` directory of this repository by default. You only need to visit the [Hybrid-PQ-CP-ABE-Library repository](https://github.com/WanThinnn/Hybrid-PQ-CP-ABE-Library.git) if you wish to compile or update to a newer version.*
+Docker automatically fetches the latest crypto source from the upstream Git repository
+and builds both the library and Vault plugin using the upstream Makefile. No
+manual binary/header copying or host C++/Go/Rust toolchain is required. Run
+`python start.py build` before `up` (also with `--prod`); `python start.py update`
+builds the latest upstream source before restarting services. Source build details:
+[English](docs/en/crypto-source-build.md) | [Tiếng Việt](docs/vi/crypto-source-build.md).
 
 ### 3. Environment Configuration
 Create the `.env` file from the example template:

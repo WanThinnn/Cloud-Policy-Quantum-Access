@@ -5,6 +5,9 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      target: web
+      args:
+        CRYPTO_BUILD_JOBS: ${CRYPTO_BUILD_JOBS:-4}
     container_name: django_app
     command: >
       sh -c "python manage.py migrate --noinput &&
@@ -13,7 +16,6 @@ services:
              gunicorn config.wsgi:application -c gunicorn.conf.py"
     volumes:
       - ./src:/app
-      - /app/lib
       - ./docs:/docs
       - ./logs:/app/logs
       - ./config:/config:ro
@@ -37,6 +39,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL:-sqlite:////app/data/db.sqlite3}
       - PYTHONUNBUFFERED=1
+      - CPABE_LIBRARY_DIR=/opt/cpqa/crypto/lib
       - DJANGO_SETTINGS_MODULE=config.settings.production
       - REDIS_URL=rediss://:${REDIS_PASSWORD:-strongpassword123}@redis_cache.cyberfortress.local:6379/1
       - REDIS_USE_TLS=True
@@ -56,7 +59,6 @@ services:
       - OLLAMA_CACERT=/certs/${ROOT_CA_FILENAME:-CyberFortress-RootCA.crt}
       - AI_FEATURES_ENABLED=${AI_FEATURES_ENABLED:-False}
     depends_on:
-      - nginx
       - redis_cache
       - vault
       - clamav
@@ -87,9 +89,13 @@ services:
     restart: unless-stopped
 
   vault:
+    platform: linux/amd64
     build:
       context: .
-      dockerfile: docker/vault/Dockerfile
+      dockerfile: docker/Dockerfile
+      target: vault
+      args:
+        CRYPTO_BUILD_JOBS: ${CRYPTO_BUILD_JOBS:-4}
     container_name: vault_server
     ports:
       - "8200:8200"

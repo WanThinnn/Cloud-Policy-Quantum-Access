@@ -62,6 +62,7 @@ Các lệnh dưới đây là hướng dẫn cho nhiệm vụ tương ứng, kh�
 
 ## Bàn giao và duy trì tài liệu
 
+- Write new documentation in English by default outside `docs/`. Under `docs/`, maintain matching English and Vietnamese versions in `docs/en/` and `docs/vi/`. Prefer these directories for detailed guides; keep root/module READMEs concise and link to the guides.
 - Báo những gì đã đổi, mục đích, kiểm tra đã thực hiện và phần chưa xác minh. Không gọi một đặc tính bảo mật là được bảo đảm chỉ dựa trên README/comment.
 - Cập nhật `FACTS.md` khi thay kiến trúc, cấu hình, luồng mật mã, entrypoint hoặc quy trình kiểm thử. Mỗi fact quan trọng cần chỉ ra file nguồn để AI sau kiểm chứng.
 - `AGENTS.md` chứa hướng dẫn làm việc; `FACTS.md` chứa thông tin đã quan sát về dự án. Không biến hai file thành nhật ký phiên hoặc nơi lưu secrets.

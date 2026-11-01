@@ -27,7 +27,10 @@ class CPABEService:
         else:
             lib_name = 'libhybrid-pq-cp-abe.so'
             
-        self.dll_path = os.path.join(settings.BASE_DIR, 'lib', lib_name)
+        # Docker artifacts live outside /app so the development bind mount
+        # cannot mask them or reuse an anonymous volume from an older image.
+        library_dir = os.environ.get('CPABE_LIBRARY_DIR', os.path.join(settings.BASE_DIR, 'lib'))
+        self.dll_path = os.path.join(library_dir, lib_name)
         self.keys_dir = os.path.join(settings.BASE_DIR, 'config', 'keys')
         self.msk_path = os.path.join(self.keys_dir, 'cpabe_msk.key')
         self.pk_path = os.path.join(self.keys_dir, 'cpabe_pk.key')

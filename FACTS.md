@@ -22,8 +22,8 @@ Hệ thống quản lý/chia sẻ file, có policy dựa trên thuộc tính ng�
 - Django `5.2.6`, DRF `3.15.2`, SimpleJWT `5.3.1`, PyCasbin `2.7.1`: `src/requirements.txt`.
 - Docker runtime dùng Ubuntu 24.04/Python 3.12; stage build CSS dùng Node 20: `docker/Dockerfile`. Đây là môi trường container, không phải cam kết mọi Python version khác đều được hỗ trợ.
 - Frontend dùng Django templates, JavaScript thuần, Tailwind 4/PostCSS: `src/templates/`, `src/static/js/`, `src/theme/static_src/package.json`.
-- `VERSION` hiện là `3.0.0`; package CSS là `4.2.0`. README đề cập thư viện crypto `v4.0.0`; các số này không cùng một miền version.
-- Có native library Windows/Linux trong `src/lib/`; mã Go/C++/CGO của Vault plugin nằm ở `src/vault-plugin/`. `go.mod` của plugin khai báo Go `1.25.7`.
+- App `VERSION` is `3.0.0`; the CSS package is `4.2.0`. Crypto builds follow upstream Git HEAD (6.0.0 at inspection time); the resolved commit/version is recorded after building in `/opt/cpqa/crypto/source.env`. These versions describe different components.
+- Docker builds the native library and Vault plugin from upstream source; `src/lib/` and `src/vault-plugin/` no longer contain vendored source, headers, or binaries. Sources: `docker/Dockerfile`, `docker/build-crypto.sh`.
 
 ## Bản đồ mã nguồn
 
@@ -70,7 +70,7 @@ Mặc dù hashing chia chunk, upload hiện vẫn gọi `file.read()` để lấ
 
 ## Mật mã và storage
 
-- Native mode tải `libhybrid-pq-cp-abe.dll` trên Windows hoặc `.so` trên hệ khác từ `src/lib/`; service được khởi tạo lazy. Constructor thật gọi `_ensure_keys_exist`, có thể tương tác Vault/khóa. Nguồn: `services/cpabe_service.py`.
+- Native mode loads `libhybrid-pq-cp-abe.dll` on Windows or `.so` elsewhere from `CPABE_LIBRARY_DIR` (Docker: `/opt/cpqa/crypto/lib`; host fallback: `src/lib/`). The service is lazy, but its constructor calls `_ensure_keys_exist` and may access Vault/keys. Sources: `services/cpabe_service.py`, `docker/Dockerfile`.
 - `USE_VAULT_ABE_PLUGIN=False`, `CPABE_SCHEME=ac17`, `ENABLE_PQC_FEATURES=True` là defaults trong `settings/base.py`; `.env.example` cũng chọn plugin False/scheme AC17. Plugin mode 3.0 dùng hai mount `abe_ac17/`, `abe_tkn20/`, KV keys `CPABE_PK_AC17`, `CPABE_PK_TKN20` và endpoint `/v1/abe_{scheme}/setup|genkey|encrypt|decrypt`. Release 3.0 mô tả file mới mặc định TKN20 nhưng điều đó phụ thuộc cấu hình thực tế; không giả định native ctypes hỗ trợ TKN20 tương đương plugin. Nguồn: `scripts/vault_manager.py`, `services/cpabe_service.py`.
 - Native service dùng tên `cpabe_pk.key`, `cpabe_msk.key`, `pqc_pk.key`, `pqc_sk.key`, với working keys ở `BASE_DIR/config/keys` và nhánh backup theo `KEYS_DIR`. Có code tạo/backup khóa và API file-based cũ; README không phải mô tả đầy đủ vòng đời khóa.
 - Encrypted fields dùng AES-GCM, HKDF-SHA3-256 và blind index HMAC-SHA3-256. Key lookup ưu tiên Vault rồi `MASTER_FIELD_ENCRYPTION_KEY`; bật/tắt qua `FIELD_ENCRYPTION`. Nguồn: `models/fields.py`, `settings/base.py`.
@@ -111,14 +111,14 @@ CLI dùng Python standard library, cú pháp `rtk python start.py [cờ toàn c�
 | --- | --- |
 | `help` hoặc không có command | In hướng dẫn. Không có nhánh `status`; dùng Compose `ps` để xem container. Cờ `-h/--help` được parse nhưng chưa có nhánh xử lý riêng để buộc hiển thị help. |
 | `setup` | Gọi `scripts/setup.py`: kiểm tra Docker/Compose, copy `.env` nếu thiếu, kiểm tra cert và thử cài Root CA vào trust store OS; không phải thao tác chỉ đọc. |
-| `build` | Compose build; chế độ prod chạy pull trước build. Không chạy native-library updater ở bước này. |
+| `build` | Compose build fetches/builds upstream crypto Git HEAD; prod first runs pull --ignore-buildable. Web/Vault use targets in the same Dockerfile; prod uses local images. |
 | `up`, `restart` | Compose up -d/restart, gọi Vault manager tối đa 10 lần với khoảng chờ 2 giây khi subprocess lỗi, trích xuất raw PQC root public key nếu cần, gọi warmup nếu `--ai`; có thể mở UDP6 relay trên Windows khi VPN IPv6/dual. |
 | `down` | Dừng UDP6 relay rồi Compose down; nhánh này không truyền `-v`. |
 | `logs` | Compose logs -f cho stack; không chuyển tiếp đối số service/filter từ `rest`. |
 | `makemigrations`, `migrate`, `initsettings` | Chạy manage.py trong service `web`, chuyển tiếp đối số; `initsettings` gọi `init_settings`. |
 | `initdata` | Vault manager → migrate → init_data.py → seed_policies → seed_test_data → trích xuất public key, warmup nếu bật; in thông tin tài khoản khởi tạo ra terminal. |
 | `createsuperuser`, `shell`, `collectstatic` | Lần lượt gọi management command riêng `create_super_admin`, Django shell, collectstatic --noinput trong `web`. |
-| `update` | git pull → cập nhật C++ libs → cập nhật source plugin → prod pull nếu có → Compose build → up -d → Vault manager/public key/warmup. Không phải nâng phiên bản được pin theo release ứng dụng 3.0. |
+| `update` | git pull --ff-only → prod pull --ignore-buildable, if selected → Compose build with latest upstream Git HEAD → up -d → Vault manager/public key/warmup. Build failures stop before recreation; no release ZIP downloads or local plugin source overwrites. |
 | `clean` | Hỏi chọn xóa container, volume DB/AI/keys+Vault/VPN/local media và docker system prune; khi chọn keys còn xóa host `vault_unseal_keys.json`, `vault_token.txt` trong `KEYS_DIR`. |
 | `rebuild` | Compose down -v → build --no-cache → up -d, tiếp đó Vault manager/public key/warmup/relay; có thể mất dữ liệu, không tương đương build lại giữ volume. |
 | `vpn_client <name>` | Tự bật profile VPN, chạy gen-client.sh ở hai service và copy `<name>_pqc.ovpn`, `<name>_classic.ovpn` ra cwd gọi CLI. Container phải đang chạy. |
@@ -131,8 +131,9 @@ CLI dùng Python standard library, cú pháp `rtk python start.py [cờ toàn c�
 - SSL external cần `USE_EXTERNAL_TLS` true và file cert/key tồn tại. Tên ưu tiên `SSL_CERT_FILE`/`SSL_KEY_FILE`, sau đó `PQC_SSL_CERT_FILE`/`PQC_SSL_KEY_FILE`, sau đó default classic. Không có kiểm tra handshake/chứng chỉ hợp lệ ở bước chọn này.
 - Windows UDP6 relay chuyển UDP 53→1194 và 443→1195, dùng `scripts/udp6_relay.py`, log `.udp6_relay.log` và PID file `.udp6_relay.pid`; không chạy helper này trên Linux/macOS.
 - `start.py` gọi `web:python vault_manager.py`; cả hai Compose mount **`scripts/vault_manager.py`** vào `/app/vault_manager.py`. File `src/vault_manager.py` trong checkout đang rỗng, nên phải đọc bản `scripts/` khi sửa luồng này. Prod manager khởi tạo mới theo 5 shares/threshold 3 và unseal cho setup ban đầu; Vault đã khởi tạo mà sealed ở lần sau sẽ yêu cầu unseal thủ công. Manager hiện xác nhận seal status sau khi gửi key, chờ authenticated mount API sẵn sàng và trả exit code 1 nếu thiếu key/token hoặc setup engine/plugin lỗi. Các nhánh up/restart/update/rebuild trả lỗi khi Vault manager thất bại. Không đổi ngưỡng Vault đã khởi tạo chỉ bằng cách chuyển --prod sang --dev.
-- `update_cpp_libs` hỏi GitHub Releases latest của **thư viện upstream**, fallback `v5.2.0`, chọn ZIP Linux/Windows; chép lib vào `src/lib/`, Linux headers/libs vào `src/vault-plugin/`. Hàm xóa `include/` và `lib/` plugin trước khi tải xong, lỗi download chỉ in warning; cần kiểm tra output trước build. Đây là version thư viện, không phải release app 3.0.
-- `update_vault_plugin` shallow clone repo thư viện upstream vào `tmp_plugin_repo`, copy `src/go/vault-plugin-abe` đè lên plugin local, sửa CGO include path và copy C++ headers, rồi dọn thư mục tạm. Không có pin commit trong lệnh clone. Các updater có thể bắt lỗi rồi cho luồng update tiếp tục; thông báo cuối thành công không chứng minh dependency update đầy đủ.
+- `docker/Dockerfile` configures the upstream URL through `CRYPTO_REPOSITORY`. BuildKit `ADD --keep-git-dir=true` resolves Git HEAD on each build and caches by the resolved commit; no tag/commit/version is hardcoded. `docker/build-crypto.sh` calls upstream `make vault` (which depends on shared), builds both artifacts from one checkout, and records commit/version in the output manifest. Toolchains: Go 1.25.7 and Rust 1.89.0, with Cargo/Go caches. CPQA no longer vendors crypto source/headers/binaries or downloads release ZIPs.
+- `docker/vault/entrypoint.sh` refreshes executable/.so artifacts in the plugin volume on every start without touching Vault data/keys. Web reads that executable to register its SHA256. The web native library lives outside `/app`; the anonymous `/app/lib` volume was removed. Instructions: `docs/en/crypto-source-build.md`, `docs/vi/crypto-source-build.md`.
+- Upstream native/plugin builds include AC17, TKN20, and CoverCrypt. CoverCrypt setup requires authority dimensions in `config_json`; CPQA application integration remains AC17/TKN20 only. `tests/smoke_crypto_image.py` exercises all three plugin schemes with disposable configuration, signed/unsigned round trips, and denied keys. CoverCrypt is not added to application settings, mounts, policy translation, or file workflows in this change.
 - `rebuild` tạo lại Compose command mà không truyền `use_ai`, nên profile AI có thể thiếu dù CLI nhận `--ai`. Các điểm lệch CLI nêu trên là quan sát tĩnh cần xác minh/sửa trong nhiệm vụ riêng; lần cập nhật tài liệu này không chạy updater, unseal, seed hay xóa volume.
 
 ## Kiểm thử, build và điểm cần kiểm chứng
@@ -143,8 +144,8 @@ CLI dùng Python standard library, cú pháp `rtk python start.py [cờ toàn c�
 - Lệnh kiểm tra có thể dùng sau khi cô lập môi trường được liệt kê trong `AGENTS.md`. Các kiểm tra đã chạy được ghi trong mục **Các task đã hoàn thành theo ngày** bên dưới; chưa build lại crypto hoặc chạy toàn bộ pytest legacy.
 - Cache key trong `signals.get_cache_key_id` thiếu thành phần scheme so với `_decrypt_file_if_needed`; đây là điểm cần kiểm tra khi sửa revocation/cache, chưa xác nhận mức ảnh hưởng runtime.
 - `src/theme/static_src/package-lock.json` đang được Git theo dõi dù `.gitignore` có rule `package-lock.json`; Docker dùng `npm ci`. Đừng xóa lockfile vì tưởng là file sinh không được quản lý.
-- Plugin build helpers: `scripts/build_plugin_for_docker.ps1` và `.sh`; output Linux AMD64 ở `docker/vault/plugins/vault-plugin-abe`. Build còn cần native/static libraries và headers trong `src/vault-plugin/`.
-- Workflow `.github/workflows/` hiện build/push app và Vault khi push tag `v*`, đọc `VERSION`, tạo GitHub Release, gán alias `latest`. README nói dual-track nhưng workflow đã đọc không thể hiện đủ cơ chế đó; prod Compose vẫn tham chiếu Vault `pqc-latest`. Kiểm tra workflow/Compose cụ thể trước khi release.
+- `scripts/build_plugin_for_docker.ps1` and `.sh` export target `crypto-artifacts` to `build/crypto/`, including the native `.so`, plugin, and source manifest. `crypto-test` runs upstream native/Go backend tests in an isolated build container and exports only a success marker.
+- `.github/workflows/docker.yml` builds/pushes web and Vault on `v*` tags using the shared Dockerfile/upstream Git source, web/vault targets, Linux AMD64, app `VERSION`, and the `latest` alias. Production Compose builds local images `cpqa-web:local` and `cpqa-vault:local`.
 - README nêu yêu cầu trình duyệt PQ TLS cụ thể; đây là tuyên bố của tài liệu, chưa kiểm tra tương thích trình duyệt/cert/handshake. Khi xử lý kết nối, xem `nginx/`, cert thực tế và log thay vì coi số version browser trong README là bảo đảm.
 
 ## Các task đã hoàn thành theo ngày
@@ -218,6 +219,15 @@ Các mốc 23 → 38 → 67 → 87 test là kết quả tại thời điểm ho�
 - `UploadedFile.find_by_path` dùng blind index khi bật field encryption; view lookup, file policy lookup và granted-user lookup dùng chung helper. Điều này sửa trường hợp mất policy riêng vì so sánh plaintext với cột path mã hóa. Strict chặn path không tìm được record và lọc từng file bằng evaluator trước pagination; chưa đo hiệu năng tập dữ liệu lớn. Nguồn: `models/storage.py`, `views/storage.py`.
 
 - Sau bổ sung strict SuperAdmin, tổng **87 test security_tests** đã qua (thêm 20 regression), gồm AC17/TKN20/cache riêng, metadata mã hóa với key test thật, policy kế thừa/deny priority/inactive, owner/grant, plaintext, path không đăng ký và bật/tắt qua form mà không khóa trang settings. `makemigrations --check --dry-run` không có thay đổi schema. Native/Vault crypto trong test giải mã vẫn được mock; không xem đây là integration test mật mã.
+
+### 2026-11-01
+
+#### Build upstream crypto source in Docker
+
+- Removed 261 obsolete vendored files, including native binaries, plugin source, and dependency headers/archives. `docker/Dockerfile` now fetches upstream Git HEAD and shares one crypto build across web/Vault targets. No source tag, commit, or version is hardcoded. BuildKit resolves HEAD again before using cache; an unchanged-source web rebuild completed in about 8 seconds on the development machine.
+- Verified web/Vault image builds, native ctypes loading (version 6.0.0), 54 upstream CLI tests plus C++ CoverCrypt/API tests, and all seven Go backend tests, including legacy authority reads. `tests/smoke_crypto_image.py` passed signed/unsigned HTTP allow/deny checks for AC17, TKN20, and CoverCrypt, and stale plugin artifact replacement, against a disposable Vault container. Four isolated CLI update/build tests passed in `tests/test_crypto_build.py`.
+- Development/production Compose configurations passed validation, including the no-external-TLS overrides; removed the web dependency on profile-only nginx and the no-TLS override's development-only Redis service name. `git diff --check` passed. Existing deployment services, keys, databases, and volumes were not changed; existing deployment ciphertext compatibility and full Django/storage/ClamAV integration were not tested.
+- CoverCrypt remains a plugin capability, with no application scheme integration added. Detailed instructions are paired under `docs/en/crypto-source-build.md` and `docs/vi/crypto-source-build.md`; root/module READMEs link to them. Documentation language/location conventions are recorded in `AGENTS.md`.
 
 ## Cách cập nhật file này
 

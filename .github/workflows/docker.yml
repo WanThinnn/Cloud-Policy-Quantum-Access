@@ -38,8 +38,9 @@ jobs:
         with:
           context: .
           file: ./docker/Dockerfile
+          target: web
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
             wanthinnn/cloud-policy-quantum-access:${{ steps.get_version.outputs.version }}
             wanthinnn/cloud-policy-quantum-access:${{ steps.get_version.outputs.alias }}
@@ -50,7 +51,8 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           context: .
-          file: ./docker/vault/Dockerfile
+          file: ./docker/Dockerfile
+          target: vault
           push: true
           platforms: linux/amd64
           tags: |
