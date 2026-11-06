@@ -1,3 +1,14 @@
 docker/build-crypto.sh text eol=lf
 docker/vault/entrypoint.sh text eol=lf
 scripts/build_plugin_for_docker.sh text eol=lf
+docker/patches/*.patch text eol=lf
+
+# Fix the fucking CRLF bug from Windows, the dumbest OS ever
+
+* text=auto eol=lf
+
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
