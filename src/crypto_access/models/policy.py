@@ -117,6 +117,13 @@ class AccessPolicy(BaseModel):
         """Auto-generate CP-ABE policy from ABAC subject_condition"""
         if not self.subject_condition:
             return ""
+
+        from django.conf import settings
+        if getattr(settings, 'CPABE_SCHEME', 'ac17').strip().lower() == 'covercrypt':
+            return self._generate_covercrypt_policy()
+
+        from crypto_access.services.abe_schemes import validate_scheme
+        scheme = validate_scheme(getattr(settings, 'CPABE_SCHEME', 'ac17'))
             
         import ast
         
@@ -156,10 +163,8 @@ class AccessPolicy(BaseModel):
                     val = val_node.value if isinstance(val_node, ast.Constant) else str(val_node)
                     return f"{attr}:{val}"
                 elif isinstance(op_node, ast.NotEq) or isinstance(op_node, ast.NotIn):
-                    import os
                     from crypto_access.models import AttributeDefinition
-                    
-                    scheme = os.environ.get('CPABE_SCHEME', 'ac17').lower()
+
                     if scheme == 'tkn20':
                         # TKN20 supports native negation
                         if isinstance(op_node, ast.NotEq):
@@ -203,6 +208,83 @@ class AccessPolicy(BaseModel):
             return ""
 
         return _build_rabe(tree.body)
+
+    def _generate_covercrypt_policy(self):
+        """Compile the safe ABAC subset to the upstream dimension::value grammar."""
+        import ast
+        from crypto_access.services.covercrypt_config import (
+            CoverCryptConfigurationError,
+            build_covercrypt_configuration,
+        )
+
+        try:
+            configuration = build_covercrypt_configuration()
+        except CoverCryptConfigurationError as exc:
+            raise ValueError(f"CoverCrypt dimension configuration is invalid: {exc}") from exc
+
+        dimensions = {item['name']: set(item['attributes']) for item in configuration.dimensions}
+        expression = self.subject_condition.replace('&&', ' and ').replace('||', ' or ').strip()
+        try:
+            tree = ast.parse(expression, mode='eval')
+        except SyntaxError as exc:
+            raise ValueError("Invalid ABAC condition syntax for CoverCrypt.") from exc
+
+        def attribute_name(node):
+            if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Attribute):
+                raise ValueError("CoverCrypt conditions must reference r.sub.<dimension> attributes.")
+            if not isinstance(node.value.value, ast.Name) or node.value.value.id != 'r' or node.value.attr != 'sub':
+                raise ValueError("CoverCrypt conditions must reference r.sub.<dimension> attributes.")
+            name = node.attr
+            if name not in dimensions:
+                raise ValueError(f"Attribute '{name}' is not a configured CoverCrypt dimension.")
+            return name
+
+        def literal_value(node):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                raise ValueError("CoverCrypt comparisons require string literals.")
+            return node.value
+
+        def compile_node(node):
+            if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
+                operator = '&&' if isinstance(node.op, ast.And) else '||'
+                compiled = [compile_node(child) for child in node.values]
+                return '(' + f' {operator} '.join(compiled) + ')'
+
+            if isinstance(node, ast.Compare):
+                if len(node.ops) != 1 or len(node.comparators) != 1:
+                    raise ValueError("Chained comparisons are not supported by CoverCrypt policy compilation.")
+                dimension = attribute_name(node.left)
+                operator = node.ops[0]
+                value_node = node.comparators[0]
+                if isinstance(operator, ast.Eq):
+                    values = [literal_value(value_node)]
+                elif isinstance(operator, ast.In):
+                    if not isinstance(value_node, (ast.List, ast.Tuple, ast.Set)) or not value_node.elts:
+                        raise ValueError("CoverCrypt 'in' requires a non-empty literal list, tuple, or set.")
+                    values = [literal_value(item) for item in value_node.elts]
+                    if len(values) != len(set(values)):
+                        raise ValueError("Duplicate values are ambiguous in a CoverCrypt 'in' condition.")
+                elif isinstance(operator, (ast.NotEq, ast.NotIn)):
+                    raise ValueError(
+                        "CoverCrypt does not support != or not in with CPQA's missing-attribute semantics."
+                    )
+                else:
+                    raise ValueError("CoverCrypt supports only == and in comparisons for enum attributes.")
+
+                invalid = [value for value in values if value not in dimensions[dimension]]
+                if invalid:
+                    raise ValueError(
+                        f"Value(s) {invalid!r} are not configured for CoverCrypt dimension '{dimension}'."
+                    )
+                atoms = [f'{dimension}::{value}' for value in values]
+                return atoms[0] if len(atoms) == 1 else '(' + ' || '.join(atoms) + ')'
+
+            raise ValueError(f"Unsupported CoverCrypt policy expression: {type(node).__name__}.")
+
+        policy = compile_node(tree.body)
+        if len(policy) > 500:
+            raise ValueError("Compiled CoverCrypt policy exceeds the 500-character CPQA policy limit.")
+        return policy
 
     def save(self, *args, **kwargs):
         if self.subject_condition:

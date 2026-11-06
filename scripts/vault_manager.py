@@ -18,6 +18,7 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 VAULT_ADDR = os.environ.get('VAULT_ADDR', 'http://localhost:8200')
+VAULT_SECRET_PATH = os.environ.get('VAULT_SECRET_PATH', 'secret/data/crypto_access')
 KEYS_DIR = os.environ.get('KEYS_DIR', '/app/config/keys')
 UNSEAL_KEYS_FILE = os.path.join(KEYS_DIR, 'vault_unseal_keys.json')
 TOKEN_FILE = os.path.join(KEYS_DIR, 'vault_token.txt')
@@ -187,6 +188,34 @@ def register_abe_plugin(client):
             print("ABE Secrets engine successfully enabled at 'abe_tkn20/'.")
         else:
             print("ABE engine already enabled at 'abe_tkn20/'.")
+
+        # Keep the existing AC17/TKN20 mounts and their data untouched. The
+        # application initializes CoverCrypt only after its database schema is
+        # available, using the guarded setup path in CPABEService.
+        covercrypt_mount_created = False
+        if 'abe_covercrypt/' not in mounts:
+            client.sys.enable_secrets_engine(
+                backend_type='vault-plugin-abe',
+                path='abe_covercrypt',
+                description='Hybrid PQC CP-ABE Engine (CoverCrypt)',
+            )
+            covercrypt_mount_created = True
+            print("ABE Secrets engine successfully enabled at 'abe_covercrypt/'.")
+        else:
+            print("ABE engine already enabled at 'abe_covercrypt/'.")
+
+        # Only a mount created by this provisioning run is eligible for the
+        # application's first setup. If an operator pre-created the mount, the
+        # app cannot inspect plugin-internal authority state and must not guess.
+        if covercrypt_mount_created:
+            secret_path = VAULT_SECRET_PATH.replace('secret/data/', '').strip('/')
+            try:
+                current = client.secrets.kv.v2.read_secret_version(path=secret_path)['data']['data']
+            except hvac.exceptions.InvalidPath:
+                current = {}
+            current['COVERCRYPT_MOUNT_CREATED'] = 'abe_covercrypt'
+            client.secrets.kv.v2.create_or_update_secret(path=secret_path, secret=current)
+            print("Recorded the new CoverCrypt mount for guarded first-time setup.")
             
     except Exception as e:
         raise RuntimeError("Failed to enable ABE secrets engines") from e

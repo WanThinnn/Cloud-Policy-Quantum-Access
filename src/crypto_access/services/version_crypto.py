@@ -27,9 +27,9 @@ def inspect_header(data):
     offset = 2 if data[0] == 2 else 1
     scheme = 'ac17'
     if data[0] == 2:
-        if len(data) < 2 or data[1] not in (0, 1):
+        if len(data) < 2 or data[1] not in (0, 1, 2):
             raise CryptoMetadataError()
-        scheme = ('ac17', 'tkn20')[data[1]]
+        scheme = ('ac17', 'tkn20', 'covercrypt')[data[1]]
     length_offset = offset + 12
     if len(data) < length_offset + 8 + 16:
         raise CryptoMetadataError()
@@ -49,7 +49,7 @@ def validate_metadata(value):
         if any(value.get(key) != expected for key, expected in PLAINTEXT_METADATA.items()):
             raise CryptoMetadataError()
     elif (value.get('format') not in ('hybrid-v1', 'hybrid-v2') or
-          value.get('scheme') not in ('ac17', 'tkn20') or value.get('backend') not in ('native', 'vault')):
+          value.get('scheme') not in ('ac17', 'tkn20', 'covercrypt') or value.get('backend') not in ('native', 'vault')):
         raise CryptoMetadataError()
     elif value['format'] == 'hybrid-v1' and value['scheme'] != 'ac17':
         raise CryptoMetadataError()
@@ -64,6 +64,11 @@ def metadata_for_read(version, data, *, backend):
         legacy = False
     elif legacy:
         header = inspect_header(data)
+        if header['scheme'] == 'covercrypt':
+            # The upstream ciphertext header does not record whether ML-DSA
+            # signing was enabled. Never guess the verification mode for an
+            # older CoverCrypt version.
+            raise CryptoMetadataError()
         # Historical signature mode is not visible in the header. Only a successful
         # signature verification can automatically establish a trustworthy signed mode.
         value = {'schema': 1, **header, 'pqc_signed': True, 'backend': backend}

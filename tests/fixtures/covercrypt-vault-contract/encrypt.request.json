@@ -1,0 +1,6 @@
+{
+  "scheme": "covercrypt",
+  "plaintext": "Y29udHJhY3QtZml4dHVyZQ==",
+  "policy": "Department::IT && Level::ADMIN",
+  "public_key": "VEVTVF9QVUJMSUNfS0VZX1NFTlRJTkVM"
+}

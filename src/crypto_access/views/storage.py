@@ -191,6 +191,10 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         if privileged_bypass and abe_scheme == 'tkn20':
             # Old keys may contain silently overwritten duplicate TKN20 labels.
             cache_key = f"cpabe_key_{abe_scheme}_bypass_v2_{user.id}_{attrs_hash}"
+        if abe_scheme == 'covercrypt':
+            # User keys are authority/configuration specific; do not reuse a cache
+            # entry after an operator changes CoverCrypt dimensions or keyset.
+            cache_key += f'_authority_{cpabe_service.covercrypt_cache_identity()}'
         cache_key += f'_meta_v1_{backend}'
         encrypted_cached_key = cache.get(cache_key)
         
@@ -349,6 +353,12 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         - tags: Optional tags (JSON array)
         - is_public: Boolean (default: False)
         """
+        from ..services.abe_schemes import UnsupportedABEScheme, validate_scheme
+        try:
+            validate_scheme()
+        except UnsupportedABEScheme as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = FileUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         new_policy = self._prepare_inline_policy(request, serializer.validated_data)

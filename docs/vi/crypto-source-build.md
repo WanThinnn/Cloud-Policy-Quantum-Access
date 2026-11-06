@@ -59,6 +59,15 @@ và public keys KV. Upstream 6.0.0 có nhánh đọc storage plugin cũ trong
 tương thích dữ liệu deployment. Không gọi setup để thử nâng cấp trên authority
 đang có dữ liệu.
 
+Trước `make vault`, build áp dụng patch
+`docker/patches/vault-authority-chunks.patch` lên Vault plugin upstream. Cách này
+giữ CPQA theo Git HEAD upstream nhưng lưu authority CoverCrypt lớn thành các giá
+trị seal-wrap nhỏ hơn 1 MiB. Patch được kiểm tra trước khi áp dụng; nếu upstream
+đổi storage authority theo cách không tương thích, build crypto sẽ dừng thay vì
+âm thầm tạo plugin chưa được vá. Authority dạng một bản ghi hiện có vẫn đọc được.
+Xem [contract Vault](covercrypt-vault-contract.md) về manifest chunk và cách
+commit.
+
 ## Kiểm thử và export
 
 ```bash
@@ -74,11 +83,18 @@ kiểm tra HTTP AC17/TKN20/CoverCrypt có/không chữ ký, allow/deny và thay 
 dùng DB/Vault/storage/volume deployment. Các kiểm tra này không chứng minh đọc
 được mọi ciphertext thực tế trong deployment.
 
-Build upstream bao gồm CoverCrypt và dependencies của nó. Setup HTTP của scheme
-này cần `config_json` mô tả dimensions của authority; không dùng cùng tham số
-khởi tạo với AC17/TKN20. Smoke test dùng dimensions giả. Phần chọn scheme và mount
-ở tầng ứng dụng CPQA hiện vẫn chỉ có AC17/TKN20; build plugin có CoverCrypt không
-đồng nghĩa đã tích hợp policy/cấu hình CoverCrypt vào upload/download của CPQA.
+Upstream v6.0.0 có CoverCrypt native và Vault plugin adapter. Vault setup cần
+`config_json` mô tả dimensions của authority; native setup đọc file JSON đã cấu
+hình qua `HCPABE_COVERCRYPT_CONFIG`. Cả hai có CoverCrypt mode `classic`,
+`post_quantum`, `hybridized`. Flag Vault `pqc` tùy chọn điều khiển chữ ký ML-DSA,
+tách biệt với CoverCrypt KEM mode.
+
+CPQA tích hợp CoverCrypt bằng dimensions đã validation từ thuộc tính CSDL đang
+hoạt động, policy compiler giới hạn, scheme metadata theo file và backend Vault
+hoặc native theo cấu hình deployment. Chỉ build artifact upstream chưa khởi tạo
+authority ứng dụng hoặc cấu hình dimensions lấy từ CSDL. Xem [hướng dẫn vòng đời
+CoverCrypt](covercrypt-configuration-lifecycle.md), [kế hoạch tích hợp](covercrypt-integration-plan.md)
+và [contract upstream](covercrypt-vault-contract.md).
 
 Hai helper `scripts/build_plugin_for_docker.sh` và `.ps1` export target
 `crypto-artifacts` vào `build/crypto/`, gồm `lib/`, `plugin/`, `source.env`. Chạy

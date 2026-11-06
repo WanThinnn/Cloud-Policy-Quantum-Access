@@ -63,6 +63,15 @@ legacy plugin storage reads in `plugin/authority.go`; following HEAD does not
 establish compatibility of every future revision with deployment data. Do not
 call setup to test an upgrade against existing authorities.
 
+The build applies `docker/patches/vault-authority-chunks.patch` to the upstream
+Vault plugin before `make vault`. This keeps the CPQA build compatible with the
+upstream Git HEAD while storing large CoverCrypt authorities as sub-1-MiB
+seal-wrapped values. The patch is checked before application; if upstream changes
+the authority storage implementation incompatibly, the crypto image build fails
+instead of silently shipping an unpatched plugin. Existing single-record
+authorities remain readable. See the [Vault contract](covercrypt-vault-contract.md)
+for the chunk manifest and commit behavior.
+
 ## Verification and export
 
 ```bash
@@ -80,12 +89,18 @@ replacement. Neither test uses deployment databases, Vault services, storage, or
 volumes. These checks do not establish compatibility with every existing
 ciphertext in a deployment.
 
-The upstream build includes CoverCrypt and its dependencies. Its HTTP setup
-requires `config_json` describing authority dimensions; it is not initialized
-with the same parameters as AC17/TKN20. The smoke test uses disposable dimensions.
-CPQA's existing application scheme selection and mounts currently cover AC17 and
-TKN20; building a CoverCrypt-capable plugin alone does not integrate CoverCrypt
-policy/configuration into application upload/download flows.
+Upstream v6.0.0 includes native CoverCrypt and the Vault plugin adapter. Vault
+setup requires `config_json` describing authority dimensions; native setup reads
+the configured JSON file through `HCPABE_COVERCRYPT_CONFIG`. Both expose
+`classic`, `post_quantum`, and `hybridized` CoverCrypt modes. The optional Vault
+`pqc` flag controls ML-DSA signing separately from the CoverCrypt KEM mode.
+
+CPQA integrates CoverCrypt using validated dimensions derived from active database
+attributes, a bounded policy compiler, per-file scheme metadata, and the Vault or
+native backend selected by deployment configuration. Building the upstream
+artifacts alone does not initialize the application authority or configure the
+database-derived dimensions. See the [CoverCrypt lifecycle guide](covercrypt-configuration-lifecycle.md),
+[integration plan](covercrypt-integration-plan.md), and [upstream contract](covercrypt-vault-contract.md).
 
 The `scripts/build_plugin_for_docker.sh` and `.ps1` helpers export the
 `crypto-artifacts` target to `build/crypto/`, including `lib/`, `plugin/`, and

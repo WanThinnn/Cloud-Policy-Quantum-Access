@@ -52,6 +52,12 @@ class AccessPolicySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Subject condition should reference r.sub attributes, e.g., r.sub.department == 'it'"
             )
+        from django.conf import settings
+        if getattr(settings, 'CPABE_SCHEME', 'ac17').strip().lower() == 'covercrypt':
+            try:
+                AccessPolicy(subject_condition=value)._generate_covercrypt_policy()
+            except ValueError as exc:
+                raise serializers.ValidationError(str(exc)) from exc
         return value
     
     def create(self, validated_data):

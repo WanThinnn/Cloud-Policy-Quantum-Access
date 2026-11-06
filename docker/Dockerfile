@@ -19,6 +19,7 @@ ARG CRYPTO_REPOSITORY=https://github.com/WanThinnn/Hybrid-PQ-CP-ABE-Library.git
 # Unlike RUN git clone, this also sees upstream updates when CPQA is unchanged.
 ADD --keep-git-dir=true ${CRYPTO_REPOSITORY} /build/crypto
 COPY docker/build-crypto.sh ./
+COPY docker/patches/vault-authority-chunks.patch ./
 ARG CRYPTO_BUILD_JOBS=4
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

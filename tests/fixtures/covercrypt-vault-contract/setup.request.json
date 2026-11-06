@@ -1,0 +1,6 @@
+{
+  "scheme": "covercrypt",
+  "pqc": true,
+  "config_json": "{\"dimensions\":[{\"name\":\"Department\",\"attributes\":[\"IT\",\"HR\"]},{\"name\":\"Level\",\"attributes\":[\"USER\",\"ADMIN\"]}]}",
+  "mode": "hybridized"
+}

@@ -1,0 +1,44 @@
+[
+  {
+    "case": "covercrypt setup requires config_json",
+    "path": "setup",
+    "data": {"scheme": "covercrypt", "pqc": false},
+    "expected_error_contains": "valid config_json"
+  },
+  {
+    "case": "covercrypt setup rejects malformed config JSON",
+    "path": "setup",
+    "data": {"scheme": "covercrypt", "config_json": "{"},
+    "expected_error_contains": "valid config_json"
+  },
+  {
+    "case": "covercrypt setup rejects empty dimensions",
+    "path": "setup",
+    "data": {"scheme": "covercrypt", "config_json": "{\"dimensions\":[]}"},
+    "expected_error_contains": "Invalid parameter"
+  },
+  {
+    "case": "covercrypt setup rejects unsupported mode",
+    "path": "setup",
+    "data": {"scheme": "covercrypt", "config_json": "{\"dimensions\":[{\"name\":\"D\",\"attributes\":[\"A\"]}]}", "mode": "invalid"},
+    "expected_error_contains": "invalid Covercrypt mode"
+  },
+  {
+    "case": "non-CoverCrypt scheme rejects config_json",
+    "path": "setup",
+    "data": {"scheme": "ac17", "config_json": "{\"dimensions\":[{\"name\":\"D\",\"attributes\":[\"A\"]}]}"},
+    "expected_error_contains": "only supported for covercrypt"
+  },
+  {
+    "case": "encrypt rejects invalid Base64 plaintext",
+    "path": "encrypt",
+    "data": {"scheme": "covercrypt", "plaintext": "%%%", "policy": "Department::IT", "public_key": "VEVTVF9QVUJMSUNfS0VZX1NFTlRJTkVM"},
+    "expected_error_contains": "plaintext must be base64 encoded"
+  },
+  {
+    "case": "decrypt rejects invalid Base64 ciphertext",
+    "path": "decrypt",
+    "data": {"ciphertext": "%%%", "secret_key": "VEVTVF9VU0VSX1NFQ1JFVF9LRVlfU0VOVElORUw="},
+    "expected_error_contains": "ciphertext must be base64 encoded"
+  }
+]

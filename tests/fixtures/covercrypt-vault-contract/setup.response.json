@@ -1,0 +1,12 @@
+{
+  "data": {
+    "public_key": "VEVTVF9QVUJMSUNfS0VZX1NFTlRJTkVM",
+    "scheme": "covercrypt",
+    "pqc": true,
+    "native_version": "6.0.0",
+    "revision": 1,
+    "pqc_public_key": "VEVTVF9QUUNfUFVCTElDX0tFWV9TRU5USU5FTA==",
+    "config_json": "{\"dimensions\":[{\"name\":\"Department\",\"attributes\":[\"IT\",\"HR\"]},{\"name\":\"Level\",\"attributes\":[\"USER\",\"ADMIN\"]}]}",
+    "mode": "hybridized"
+  }
+}
