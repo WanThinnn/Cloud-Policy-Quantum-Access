@@ -44,6 +44,51 @@ The library's v2 envelope has a scheme indicator byte: `0` AC17, `1` TKN20, and 
 
 The header identifies ciphertext format and ABE scheme; it does **not** record whether ML-DSA signing was enabled. The Vault `encrypt` response only returns `ciphertext`, so the caller must record signature mode from the exact key/configuration used for that encryption in the per-version metadata. For a version recorded as signed, decryption must provide the matching verification public key and require verification success. Never infer the signature mode from `CPABE_SCHEME`, the current `pqc` setting, or the ABE header.
 
+## CPQA public-key reference extension
+
+CPQA applies `docker/patches/vault-covercrypt-public-reference.patch` after the
+authority-chunk patch. For CoverCrypt only, setup and dimension-growth responses
+return `public_key` as `vault-authority-sha256:<64 lowercase hex characters>`.
+This references the exact serialized public key retained in plugin storage.
+AC17/TKN20 and native C ABI serialization are unchanged. Legacy Base64 encryption
+requests remain supported by the plugin.
+
+`GET /v1/abe_covercrypt/authority` returns the existing public response: reference,
+config, mode, revision, signing state and optional ML-DSA verification public key.
+It never runs setup, writes authority state or exports MSK/signing secrets.
+Encrypt accepts the reference in `public_key`, requires CoverCrypt and an exact
+fingerprint match with the stored authority, and uses the stored public key.
+A different fingerprint is rejected before native encryption.
+
+This avoids sending large public keys to KV and back to the encrypt API. The app
+schema with dimension cardinalities 4/3/6/4/5/6 produced a 35,952,472-byte key
+(47,936,632 bytes in Base64), exceeding Vault's default 33,554,432-byte HTTP request
+limit. Authority chunking alone does not solve this second boundary. KV now stores
+the compact reference, verification key and config/key fingerprint manifest.
+
+After an interrupted first initialization, CPQA may read `/authority` to finish
+public metadata persistence only if the guard matches the active configuration
+and provisioning recorded a newly created mount. It validates scheme, config,
+mode, reference, signing state and any recorded keys. Missing/unsupported reads
+or mismatches fail closed without another setup. Upgrade web and Vault together;
+preserve data/key volumes. Do not clear the guard when an authority exists.
+The deployment token needs read capability on `abe_covercrypt/authority`; the app
+does not automatically broaden ACLs.
+
+Initialization uses a durable KV v2 CAS guard: one worker claims it before setup;
+other workers cannot run setup. The guard has no lease/expiry, so a crashed or
+timed-out initializer cannot be replaced automatically while its request may
+still be executing. Public reference, verifier, manifest and completed guard are
+published in one CAS-protected KV revision. Native CoverCrypt uses the same
+claim/atomic-publication rules. Related state is read from a fresh, consistent
+Vault revision, bypassing worker caches; Vault outages are errors, not absent keys.
+
+`VaultService.put_secret` merges with CAS and at most eight conflict retries,
+rereading the latest record for every retry. Non-CAS errors are not retried;
+deleted/destroyed records are not recreated as empty records. Least-privilege
+deployment tokens need the appropriate KV data read/create/update capabilities
+and metadata read to distinguish an absent path from unavailable/deleted state.
+
 ## Error behavior
 
 Plugin validation and native failures are returned as Vault logical error responses (the Vault HTTP API normally represents these as an error response, commonly HTTP 400 with an `errors` array). Stable error categories observed in source include:

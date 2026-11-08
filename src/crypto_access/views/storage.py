@@ -161,10 +161,16 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         user_attrs = casbin_service.get_user_attributes(user)
         
         # CP-ABE Bypass for SuperAdmin and File Owner
-        # We mathematically satisfy the policy by extracting required attributes from the policy string
-        privileged_bypass = can_bypass_document_policy(user) or (is_owner and not strict)
+        # Only an already-authorized non-strict bypass may request a satisfying key.
+        privileged_bypass = not strict and (can_bypass_document_policy(user) or is_owner)
         if privileged_bypass and abe_scheme == 'tkn20':
             user_attrs = bypass_attributes(user_attrs, policies_to_parse)
+        elif privileged_bypass and abe_scheme == 'covercrypt':
+            from ..services.covercrypt_policy import bypass_attributes as covercrypt_bypass_attributes
+            try:
+                user_attrs = covercrypt_bypass_attributes(user_attrs, policies_to_parse)
+            except ValueError as exc:
+                raise PermissionDenied('CoverCrypt policy cannot be satisfied by a valid bypass key.') from exc
         elif privileged_bypass:
             import re
             for p_str in policies_to_parse:
@@ -191,6 +197,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         if privileged_bypass and abe_scheme == 'tkn20':
             # Old keys may contain silently overwritten duplicate TKN20 labels.
             cache_key = f"cpabe_key_{abe_scheme}_bypass_v2_{user.id}_{attrs_hash}"
+        if privileged_bypass and abe_scheme == 'covercrypt':
+            cache_key = f"cpabe_key_covercrypt_bypass_v1_{user.id}_{attrs_hash}"
         if abe_scheme == 'covercrypt':
             # User keys are authority/configuration specific; do not reuse a cache
             # entry after an operator changes CoverCrypt dimensions or keyset.
@@ -633,12 +641,10 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             if policy_obj:
                 if policy_obj.pk is None:
                     policy_obj.save()
-                FileAccessPolicy.objects.create(
+                FileAccessPolicy.objects.get_or_create(
                     uploaded_file=uploaded_file,
-                    bucket=bucket,
-                    target_type='file',
                     policy=policy_obj,
-                    assigned_by=request.user
+                    defaults={'bucket': bucket, 'target_type': 'file', 'assigned_by': request.user},
                 )
             
             return Response(

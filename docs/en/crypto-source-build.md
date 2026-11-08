@@ -72,6 +72,12 @@ instead of silently shipping an unpatched plugin. Existing single-record
 authorities remain readable. See the [Vault contract](covercrypt-vault-contract.md)
 for the chunk manifest and commit behavior.
 
+The following `vault-covercrypt-public-reference.patch` adds a read-only public
+authority endpoint and fingerprint-bound CoverCrypt public-key references. Both
+web and Vault must use this contract; its checksum is recorded separately in
+`source.env`. See the [Vault contract](covercrypt-vault-contract.md) for safe
+recovery after authority creation succeeds but public metadata persistence fails.
+
 ## Verification and export
 
 ```bash

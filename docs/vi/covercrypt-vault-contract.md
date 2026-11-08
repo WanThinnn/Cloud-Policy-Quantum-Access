@@ -44,6 +44,46 @@ Envelope v2 của thư viện có byte scheme indicator: `0` AC17, `1` TKN20, `2
 
 Header nhận diện format và ABE scheme; **không** ghi việc có bật ký ML-DSA hay không. Response Vault `encrypt` chỉ trả `ciphertext`, nên caller phải ghi signature mode theo chính key/config dùng cho encryption trong metadata từng version. Version đã ghi signed phải gửi đúng verification public key và yêu cầu verify thành công khi decrypt. Không đoán signature mode từ `CPABE_SCHEME`, setting `pqc` hiện tại hay ABE header.
 
+## Phần mở rộng public-key reference của CPQA
+
+CPQA áp dụng `docker/patches/vault-covercrypt-public-reference.patch` sau patch
+chia nhỏ authority. Riêng CoverCrypt, response setup và add_dimension trả
+`public_key` dạng `vault-authority-sha256:<64 ký tự hex thường>`, tham chiếu tới
+đúng public key đã serialize trong plugin storage. Serialization AC17/TKN20 và
+native C ABI không đổi. Plugin vẫn nhận request mã hóa dùng public key Base64 cũ.
+
+`GET /v1/abe_covercrypt/authority` đọc public response hiện có: reference, config,
+mode, revision, trạng thái ký và verification public key ML-DSA nếu có. Endpoint
+không chạy setup, không ghi authority và không xuất MSK/signing secret. Encrypt
+nhận reference trong `public_key`, bắt buộc scheme CoverCrypt và fingerprint
+khớp chính xác authority trước khi dùng public key bên trong để mã hóa.
+
+Schema ứng dụng có số giá trị mỗi dimension 4/3/6/4/5/6 đã tạo public key
+35.952.472 byte, thành 47.936.632 byte khi Base64, vượt giới hạn HTTP request
+33.554.432 byte mặc định của Vault. Chia nhỏ authority không xử lý ranh giới
+request này. KV nay chỉ lưu reference nhỏ, verification key và manifest chứa
+fingerprint config/key; encrypt cũng không gửi lại public key lớn.
+
+Sau lần khởi tạo đầu bị gián đoạn, CPQA chỉ đọc `/authority` để hoàn tất public
+metadata khi guard khớp config active và provisioning đã ghi nhận mount mới.
+Scheme, config, mode, reference, trạng thái ký và các key đã ghi đều được kiểm
+tra. Endpoint thiếu/không hỗ trợ hoặc dữ liệu không khớp thì từ chối, không gọi
+setup lại. Nâng cấp đồng thời web và Vault, giữ volume dữ liệu/khóa. Không gỡ
+guard khi authority đã tồn tại. Token triển khai cần quyền read trên
+`abe_covercrypt/authority`; ứng dụng không tự mở rộng ACL.
+
+Khởi tạo dùng guard bền vững qua CAS của KV v2: chỉ worker lấy được guard mới
+được chạy setup. Guard không có lease/hết hạn, tránh worker khác setup lại khi
+request trước có thể còn chạy. Reference, verifier, manifest và guard hoàn tất
+được ghi cùng một revision có CAS. Native CoverCrypt cũng dùng claim và ghi
+keyset nguyên tử. Các trường liên quan được đọc từ một revision Vault mới,
+không dùng cache riêng của worker; Vault lỗi không bị coi là chưa có khóa.
+
+`VaultService.put_secret` merge bằng CAS, tối đa tám lần retry khi xung đột và
+đọc lại record mới mỗi lần. Không retry lỗi khác CAS và không tái tạo record đã
+xóa/hủy thành record trống. Token triển khai tối thiểu cần quyền read/create/update
+KV data phù hợp và read metadata để phân biệt path chưa có với state bị xóa/lỗi.
+
 ## Cách trả lỗi
 
 Lỗi validation plugin và lỗi native trả về dưới dạng Vault logical error response (Vault HTTP API thường biểu diễn thành error response, phổ biến là HTTP 400 có mảng `errors`). Các nhóm lỗi ổn định thấy trong source:

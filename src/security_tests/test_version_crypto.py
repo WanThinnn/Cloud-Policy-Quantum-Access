@@ -125,6 +125,7 @@ class VersionCryptoTests(TestCase):
                     response = self.client.post('/api/storage/files/upload/', {
                         'file': SimpleUploadedFile('report.txt', f'upload-{number}'.encode(), content_type='text/plain'),
                         'file_path': 'report.txt', 'bucket_name': 'documents', 'policy_id': policy.pk,
+                        'is_new_version': 'true' if number > 1 else 'false',
                     }, format='multipart')
             self.assertEqual(response.status_code, 201, response.data)
         file = UploadedFile.find_by_path('documents', 'report.txt')

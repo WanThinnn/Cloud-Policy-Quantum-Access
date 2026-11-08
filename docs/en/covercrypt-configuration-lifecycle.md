@@ -12,6 +12,23 @@ Seeded `AccessPolicy` records remain CPQA authorization and policy inputs. They 
 
 The compiler supports string equality, membership in a non-empty literal list/tuple/set, `and`, `or`, and parentheses. It checks every dimension and value against the same validated setup configuration. It rejects `!=` and `not in`: CPQA's evaluator can treat a missing attribute as unequal, while CoverCrypt keys require a positive attribute to satisfy the complemented policy. It also rejects ordering comparisons, chained comparisons, unary negation, non-string literals, and unconfigured attributes.
 
+## Document bypass and strict mode
+
+For a permitted non-strict administrator/owner document bypass,
+`services/covercrypt_policy.py` parses the version's policy as a bounded positive
+Boolean expression and chooses a consistent allowed value per dimension
+satisfying the complete expression. Unconstrained dimensions use valid current
+values or deterministic configured values. This ephemeral key assignment does
+not modify stored attributes or policies. Contradictory, unconfigured, malformed
+and excessive expressions fail closed. The helper grants no application rights.
+
+Bypass keys use the separate `covercrypt_bypass_v1` namespace with user,
+assignment, authority fingerprint and backend. With `SUPER_ADMIN_REQUIRE_POLICY`
+enabled, privileged administrators pass document authorization and use real
+attributes in the strict namespace, including when they own the file. Ordinary
+users do not receive a satisfying assignment unless an existing owner bypass
+explicitly applies.
+
 ## Privileged discovery
 
 After `start.py initdata`, a super administrator can inspect the generated setup document through `GET /api/admin/covercrypt/configuration/`. The endpoint requires authentication and `IsSuperAdmin`; it is the supported API to review the generated JSON. Clients do not query the database directly.

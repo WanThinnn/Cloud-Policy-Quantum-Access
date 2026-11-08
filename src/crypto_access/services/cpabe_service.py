@@ -12,6 +12,7 @@ import requests
 import urllib3
 import hashlib
 import threading
+from .covercrypt_public_key import public_key_fingerprint, public_key_reference
 
 logger = logging.getLogger(__name__)
 
@@ -202,11 +203,15 @@ class CPABEService:
         if not vault_service.is_authenticated():
             raise CPABEError("Vault authentication is required to verify the CoverCrypt keyset.")
         configuration = build_covercrypt_configuration()
-        public_key_b64 = vault_service.get_secret(COVERCRYPT_PUBLIC_KEY_KEY)
-        pqc_public_key_b64 = vault_service.get_secret(COVERCRYPT_PQC_PUBLIC_KEY_KEY)
-        manifest_raw = vault_service.get_secret(COVERCRYPT_MANIFEST_KEY)
-        init_marker = vault_service.get_secret(COVERCRYPT_INIT_MARKER_KEY)
-        mount_created_marker = vault_service.get_secret(COVERCRYPT_MOUNT_CREATED_KEY)
+        state = vault_service.get_secrets([
+            COVERCRYPT_PUBLIC_KEY_KEY, COVERCRYPT_PQC_PUBLIC_KEY_KEY, COVERCRYPT_MANIFEST_KEY,
+            COVERCRYPT_INIT_MARKER_KEY, COVERCRYPT_MOUNT_CREATED_KEY,
+        ])
+        public_key_b64 = state.get(COVERCRYPT_PUBLIC_KEY_KEY)
+        pqc_public_key_b64 = state.get(COVERCRYPT_PQC_PUBLIC_KEY_KEY)
+        manifest_raw = state.get(COVERCRYPT_MANIFEST_KEY)
+        init_marker = state.get(COVERCRYPT_INIT_MARKER_KEY)
+        mount_created_marker = state.get(COVERCRYPT_MOUNT_CREATED_KEY)
 
         if manifest_raw is not None:
             if not public_key_b64:
@@ -214,10 +219,7 @@ class CPABEService:
             if pqc_enabled and not pqc_public_key_b64:
                 raise CPABEError("CoverCrypt signing is enabled but its verification key is missing from Vault KV.")
             try:
-                pk_bytes = base64.b64decode(public_key_b64, validate=True)
-                if not pk_bytes:
-                    raise ValueError("empty public key")
-                key_fingerprint = hashlib.sha256(pk_bytes).hexdigest()
+                key_fingerprint = public_key_fingerprint(public_key_b64)
                 verify_keyset_manifest(
                     manifest_raw,
                     COVERCRYPT_KEYSET_ID,
@@ -235,11 +237,17 @@ class CPABEService:
                 raise CPABEError(f"CoverCrypt keyset does not match the active configuration: {exc}") from exc
             return public_key_b64
 
-        if init_marker is not None or public_key_b64 is not None or pqc_public_key_b64 is not None:
-            raise CPABEError(
-                "CoverCrypt keyset state is incomplete or an authority may already exist. "
-                "Refusing setup; reconcile Vault state through the operator recovery procedure."
-            )
+        recovering = init_marker is not None or public_key_b64 is not None or pqc_public_key_b64 is not None
+        if recovering:
+            # Only reconcile a failed first initialization belonging to this exact config.
+            # Read the existing authority; never repeat the destructive setup call.
+            try:
+                marker_data = json.loads(init_marker) if isinstance(init_marker, str) else init_marker
+            except ValueError:
+                marker_data = None
+            if (not isinstance(marker_data, dict) or marker_data.get('status') != 'initializing' or
+                    marker_data.get('config_fingerprint') != configuration.fingerprint):
+                raise CPABEError("CoverCrypt keyset state is incomplete; operator reconciliation is required.")
 
         if mount_created_marker != COVERCRYPT_VAULT_MOUNT:
             raise CPABEError(
@@ -248,8 +256,8 @@ class CPABEService:
             )
 
         marker = json.dumps({"status": "initializing", "config_fingerprint": configuration.fingerprint})
-        if not vault_service.put_secret(COVERCRYPT_INIT_MARKER_KEY, marker):
-            raise CPABEError("Could not create the CoverCrypt initialization guard in Vault KV.")
+        if not recovering and not vault_service.claim_secret(COVERCRYPT_INIT_MARKER_KEY, marker):
+            raise CPABEError("CoverCrypt initialization is in progress or its guard could not be acquired; retry later.")
 
         payload = {
             "scheme": "covercrypt",
@@ -258,13 +266,16 @@ class CPABEService:
             "pqc": bool(pqc_enabled),
         }
         try:
-            response = requests.put(
-                f"{vault_service.get_addr}/v1/{COVERCRYPT_VAULT_MOUNT}/setup",
-                headers=headers,
-                json=payload,
-                verify=self._vault_verify,
-                timeout=120,
-            )
+            if recovering:
+                response = requests.get(
+                    f"{vault_service.get_addr}/v1/{COVERCRYPT_VAULT_MOUNT}/authority",
+                    headers=headers, verify=self._vault_verify, timeout=120,
+                )
+            else:
+                response = requests.put(
+                    f"{vault_service.get_addr}/v1/{COVERCRYPT_VAULT_MOUNT}/setup",
+                    headers=headers, json=payload, verify=self._vault_verify, timeout=120,
+                )
             response.raise_for_status()
             data = response.json()["data"]
             if data.get("scheme") != "covercrypt" or not data.get("public_key"):
@@ -273,33 +284,36 @@ class CPABEService:
                 raise CPABEError("Vault CoverCrypt setup returned a different configuration or mode.")
 
             returned_pk = data["public_key"]
-            pk_bytes = base64.b64decode(returned_pk, validate=True)
-            if not pk_bytes:
-                raise CPABEError("Vault CoverCrypt setup returned an empty public key.")
+            # Require the updated plugin contract before persisting anything. A legacy
+            # large Base64 response must not be sent back through the KV request limit.
+            if returned_pk != public_key_reference(returned_pk):
+                raise CPABEError("Upgrade the Vault plugin to support CoverCrypt public-key references.")
+            key_fingerprint = public_key_fingerprint(returned_pk)
+            if public_key_b64 and public_key_fingerprint(public_key_b64) != key_fingerprint:
+                raise CPABEError("Recovered CoverCrypt authority differs from the recorded public key.")
             returned_pqc_pk = data.get("pqc_public_key")
             if pqc_enabled and not returned_pqc_pk:
                 raise CPABEError("Vault CoverCrypt setup did not return its requested verification key.")
             if returned_pqc_pk:
                 base64.b64decode(returned_pqc_pk, validate=True)
+            if (type(data.get('pqc')) is not bool or data['pqc'] != bool(returned_pqc_pk) or
+                    (pqc_public_key_b64 and pqc_public_key_b64 != returned_pqc_pk)):
+                raise CPABEError("Recovered CoverCrypt signature state is inconsistent.")
 
             manifest = build_keyset_manifest(
                 COVERCRYPT_KEYSET_ID,
                 COVERCRYPT_VAULT_MOUNT,
                 configuration,
-                public_key_fingerprint=hashlib.sha256(pk_bytes).hexdigest(),
+                public_key_fingerprint=key_fingerprint,
             )
-            manifest['pqc_enabled'] = bool(pqc_enabled)
-            if not vault_service.put_secret(COVERCRYPT_PUBLIC_KEY_KEY, returned_pk):
-                raise CPABEError("Could not persist the CoverCrypt public key in Vault KV.")
-            if returned_pqc_pk and not vault_service.put_secret(COVERCRYPT_PQC_PUBLIC_KEY_KEY, returned_pqc_pk):
-                raise CPABEError("Could not persist the CoverCrypt verification key in Vault KV.")
-            if not vault_service.put_secret(
-                COVERCRYPT_MANIFEST_KEY,
-                json.dumps(manifest, sort_keys=True, separators=(",", ":")),
-            ):
-                raise CPABEError("Could not persist the CoverCrypt keyset manifest in Vault KV.")
-            if not vault_service.put_secret(COVERCRYPT_INIT_MARKER_KEY, "initialized"):
-                raise CPABEError("Could not finalize the CoverCrypt initialization guard in Vault KV.")
+            manifest['pqc_enabled'] = data['pqc']
+            if not vault_service.put_secrets({
+                COVERCRYPT_PUBLIC_KEY_KEY: returned_pk,
+                COVERCRYPT_PQC_PUBLIC_KEY_KEY: returned_pqc_pk,
+                COVERCRYPT_MANIFEST_KEY: json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+                COVERCRYPT_INIT_MARKER_KEY: "initialized",
+            }):
+                raise CPABEError("Could not atomically persist CoverCrypt keyset metadata in Vault KV.")
             return returned_pk
         except Exception as exc:
             if isinstance(exc, requests.HTTPError) and exc.response is not None:
@@ -338,13 +352,17 @@ class CPABEService:
 
         configuration = build_covercrypt_configuration()
         pqc_enabled = bool(getattr(settings, 'ENABLE_PQC_FEATURES', False))
-        pk_b64 = vault_service.get_secret(COVERCRYPT_NATIVE_PK_KEY)
-        msk_b64 = vault_service.get_secret(COVERCRYPT_NATIVE_MSK_KEY)
-        pqc_pk_b64 = vault_service.get_secret(COVERCRYPT_NATIVE_PQC_PK_KEY)
-        pqc_sk_b64 = vault_service.get_secret(COVERCRYPT_NATIVE_PQC_SK_KEY)
         manifest_key = f"COVERCRYPT_KEYSET_MANIFEST_{COVERCRYPT_NATIVE_KEYSET_ID}"
         init_key = f"COVERCRYPT_KEYSET_INITIALIZING_{COVERCRYPT_NATIVE_KEYSET_ID}"
-        manifest_raw = vault_service.get_secret(manifest_key)
+        state = vault_service.get_secrets([
+            COVERCRYPT_NATIVE_PK_KEY, COVERCRYPT_NATIVE_MSK_KEY, COVERCRYPT_NATIVE_PQC_PK_KEY,
+            COVERCRYPT_NATIVE_PQC_SK_KEY, manifest_key, init_key,
+        ])
+        pk_b64 = state.get(COVERCRYPT_NATIVE_PK_KEY)
+        msk_b64 = state.get(COVERCRYPT_NATIVE_MSK_KEY)
+        pqc_pk_b64 = state.get(COVERCRYPT_NATIVE_PQC_PK_KEY)
+        pqc_sk_b64 = state.get(COVERCRYPT_NATIVE_PQC_SK_KEY)
+        manifest_raw = state.get(manifest_key)
 
         if manifest_raw:
             if not pk_b64 or not msk_b64:
@@ -367,9 +385,9 @@ class CPABEService:
             return
         if any((pk_b64, msk_b64, pqc_pk_b64, pqc_sk_b64)):
             raise CPABEError("Native CoverCrypt Vault state is incomplete; refusing to replace authority keys.")
-        if vault_service.get_secret(init_key) is not None:
+        if state.get(init_key) is not None:
             raise CPABEError("Native CoverCrypt setup was interrupted or is in progress; operator reconciliation is required.")
-        if not vault_service.put_secret(init_key, json.dumps({"status": "initializing", "config_fingerprint": configuration.fingerprint})):
+        if not vault_service.claim_secret(init_key, json.dumps({"status": "initializing", "config_fingerprint": configuration.fingerprint})):
             raise CPABEError("Could not create the native CoverCrypt initialization guard in Vault KV.")
 
         scheme = 2  # CPABE_SCHEME_COVERCRYPT in the upstream v6 API.
@@ -421,13 +439,11 @@ class CPABEService:
                     (COVERCRYPT_NATIVE_PK_KEY, pk), (COVERCRYPT_NATIVE_MSK_KEY, msk),
                     (COVERCRYPT_NATIVE_PQC_PK_KEY, pqc_pk), (COVERCRYPT_NATIVE_PQC_SK_KEY, pqc_sk),
                 ]
-                for key, value in values:
-                    if value and not vault_service.put_secret(key, base64.b64encode(value).decode("ascii")):
-                        raise CPABEError("Could not persist native CoverCrypt key material in Vault.")
-                if not vault_service.put_secret(manifest_key, json.dumps(manifest, sort_keys=True, separators=(",", ":"))):
-                    raise CPABEError("Could not persist the native CoverCrypt keyset manifest in Vault.")
-                if not vault_service.put_secret(init_key, "initialized"):
-                    raise CPABEError("Could not finalize the native CoverCrypt initialization guard.")
+                record = {key: base64.b64encode(value).decode("ascii") if value else None for key, value in values}
+                record[manifest_key] = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+                record[init_key] = "initialized"
+                if not vault_service.put_secrets(record):
+                    raise CPABEError("Could not atomically persist native CoverCrypt keyset in Vault.")
                 self.covercrypt_pk_data, self.covercrypt_msk_data = pk, msk
                 self.covercrypt_pqc_pk_data, self.covercrypt_pqc_sk_data = pqc_pk, pqc_sk
                 self.pk_data = base64.b64encode(pk)
@@ -462,10 +478,9 @@ class CPABEService:
         try:
             from .covercrypt_config import build_covercrypt_configuration, verify_keyset_manifest
             configuration = build_covercrypt_configuration()
-            pk = base64.b64decode(pk_b64, validate=True)
             verified = verify_keyset_manifest(
                 manifest, COVERCRYPT_NATIVE_KEYSET_ID if mount == "native" else COVERCRYPT_KEYSET_ID,
-                mount, configuration, public_key_fingerprint=hashlib.sha256(pk).hexdigest(),
+                mount, configuration, public_key_fingerprint=public_key_fingerprint(pk_b64),
             )
             return f"{verified['config_fingerprint']}:{verified['public_key_fingerprint']}"
         except Exception as exc:
@@ -520,7 +535,9 @@ class CPABEService:
             if current_scheme == 'tkn20' and tkn20_pk_b64:
                 self.pk_data = base64.b64decode(tkn20_pk_b64)
             elif current_scheme == 'covercrypt' and covercrypt_pk_b64:
-                self.pk_data = base64.b64decode(covercrypt_pk_b64)
+                # The plugin holds this large public key; CoverCrypt callers pass
+                # its verified reference instead of a native key buffer.
+                self.pk_data = b''
             elif ac17_pk_b64:
                 self.pk_data = base64.b64decode(ac17_pk_b64)
 

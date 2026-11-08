@@ -16,7 +16,7 @@ from crypto_access.views.covercrypt import covercrypt_configuration
 class CoverCryptConfigurationTests(TestCase):
     def setUp(self):
         definitions = [
-            ("department", ["hr", "it"]),
+            ("department", ["hr", "it", "finance"]),
             ("role", ["employee", "manager"]),
             ("clearance_level", ["public", "confidential", "secret", "top_secret"]),
             ("data_access", ["basic", "advanced", "full"]),

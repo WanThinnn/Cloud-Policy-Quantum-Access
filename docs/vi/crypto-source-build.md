@@ -68,6 +68,12 @@ trị seal-wrap nhỏ hơn 1 MiB. Patch được kiểm tra trước khi áp d�
 Xem [contract Vault](covercrypt-vault-contract.md) về manifest chunk và cách
 commit.
 
+Patch tiếp theo `vault-covercrypt-public-reference.patch` thêm endpoint chỉ đọc
+public authority và reference public key CoverCrypt gắn fingerprint. Web/Vault
+phải dùng cùng contract; checksum patch được ghi riêng trong `source.env`.
+Xem [contract Vault](covercrypt-vault-contract.md) về phục hồi khi authority đã
+tạo thành công nhưng ghi public metadata thất bại.
+
 ## Kiểm thử và export
 
 ```bash

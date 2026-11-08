@@ -95,6 +95,20 @@ def main():
                         ]})
                     setup = call('setup', setup_request)
                     assert setup['native_version'] == expected_version, setup['native_version']
+                    if scheme == 'covercrypt':
+                        reference = setup['public_key']
+                        assert reference.startswith('vault-authority-sha256:') and len(reference) == 87
+                        recovered = api(mount + '/authority')['data']
+                        assert recovered['public_key'] == reference
+                        assert recovered['revision'] == setup['revision']
+                        assert not {'master_key', 'msk', 'secret_key', 'pqc_private_key'} & recovered.keys()
+                        try:
+                            call('encrypt', {'scheme': scheme, 'plaintext': 'aGVsbG8=', 'policy': policy,
+                                             'public_key': 'vault-authority-sha256:' + '0' * 64})
+                        except urllib.error.HTTPError as error:
+                            assert error.code == 400
+                        else:
+                            raise AssertionError('Mismatched public-key reference accepted')
                     user = call('genkey', {'scheme': scheme, 'attributes': attrs})
                     denied = call('genkey', {'scheme': scheme, 'attributes': wrong})
                     plain = base64.b64encode(b'CPQA real crypto\x00\xff').decode()
@@ -112,6 +126,33 @@ def main():
                     else:
                         raise AssertionError('Unauthorized key decrypted ciphertext')
                     print(f'{scheme}, signed={signed}: allow/deny OK')
+            # Reproduce the application schema's 8,640 combinations. Its public key
+            # is larger than Vault's 32-MiB HTTP limit, while every reference request
+            # and response remains small. No deployment authority/config is used.
+            mount = 'test_covercrypt_large'
+            api('sys/mounts/' + mount, {'type': 'vault-plugin-abe'})
+            config = {'dimensions': [
+                {'name': f'D{index}', 'attributes': [f'v{i}' for i in range(count)]}
+                for index, count in enumerate((4, 3, 6, 4, 5, 6))
+            ]}
+            setup = api(mount + '/setup', {'scheme': 'covercrypt', 'pqc': True,
+                                          'config_json': json.dumps(config)})['data']
+            assert len(setup['public_key']) == 87
+            recovered = api(mount + '/authority')['data']
+            assert recovered['public_key'] == setup['public_key']
+            for denied in (False, True):
+                attrs = ' '.join(f'D{i}::v{1 if denied and i == 0 else 0}' for i in range(6))
+                key = api(mount + '/genkey', {'scheme': 'covercrypt', 'attributes': attrs})['data']
+                cipher = api(mount + '/encrypt', {'scheme': 'covercrypt', 'policy': 'D0::v0',
+                             'plaintext': 'aGVsbG8=', 'public_key': recovered['public_key']})['data']
+                try:
+                    result = api(mount + '/decrypt', {'ciphertext': cipher['ciphertext'],
+                                 'secret_key': key['secret_key'], 'pqc_public_key': setup['pqc_public_key']})
+                except urllib.error.HTTPError as error:
+                    assert denied and error.code == 400
+                else:
+                    assert not denied and result['data']['plaintext'] == 'aGVsbG8='
+            print('CoverCrypt large public-key reference recovery and signed allow/deny: OK')
             print(f'Vault image loads matching native library {expected_version}: OK')
         finally:
             subprocess.run(['docker', 'rm', '-f', name], capture_output=True)

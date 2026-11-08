@@ -1,0 +1,132 @@
+--- a/plugins/vault/vault-plugin-abe/plugin/backend.go
++++ b/plugins/vault/vault-plugin-abe/plugin/backend.go
+@@ -37,6 +37,7 @@
+ 			},
+ 		},
+ 		Paths: []*framework.Path{
++			pathAuthority(&b),
+ 			pathSetup(&b),
+ 			pathAddDimension(&b),
+ 			pathGenKey(&b),
+--- a/plugins/vault/vault-plugin-abe/plugin/authority.go
++++ b/plugins/vault/vault-plugin-abe/plugin/authority.go
+@@ -188,8 +188,12 @@
+ }
+ 
+ func (state *authorityState) publicResponse() *logical.Response {
++	publicKey := base64.StdEncoding.EncodeToString(state.PK)
++	if state.Scheme == "covercrypt" {
++		publicKey = fmt.Sprintf("vault-authority-sha256:%x", sha256.Sum256(state.PK))
++	}
+ 	data := map[string]interface{}{
+-		"public_key": base64.StdEncoding.EncodeToString(state.PK), "scheme": state.Scheme,
++		"public_key": publicKey, "scheme": state.Scheme,
+ 		"pqc": len(state.PQCSecret) != 0, "native_version": nativeVersion(), "revision": state.Revision,
+ 	}
+ 	if len(state.PQCPublic) != 0 {
+--- a/plugins/vault/vault-plugin-abe/plugin/path_crypto.go
++++ b/plugins/vault/vault-plugin-abe/plugin/path_crypto.go
+@@ -9,6 +9,9 @@
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
++	"fmt"
++	"strings"
+ 	"encoding/base64"
+ 	"unsafe"
+ 
+@@ -106,9 +109,22 @@
+ 	if err != nil {
+ 		return logical.ErrorResponse("plaintext must be base64 encoded"), nil
+ 	}
+-	pkBytes, err := base64.StdEncoding.DecodeString(pkBase64)
+-	if err != nil {
+-		return logical.ErrorResponse("public_key must be base64 encoded"), nil
++	var pkBytes []byte
++	if strings.HasPrefix(pkBase64, "vault-authority-sha256:") {
++		state, loadErr := loadAuthority(ctx, req.Storage)
++		if loadErr != nil {
++			return nil, loadErr
++		}
++		if schemeStr != "covercrypt" || state == nil || state.Scheme != schemeStr ||
++			pkBase64 != fmt.Sprintf("vault-authority-sha256:%x", sha256.Sum256(state.PK)) {
++			return logical.ErrorResponse("public_key reference differs from the stored authority"), nil
++		}
++		pkBytes = state.PK
++	} else {
++		pkBytes, err = base64.StdEncoding.DecodeString(pkBase64)
++		if err != nil {
++			return logical.ErrorResponse("public_key must be base64 encoded"), nil
++		}
+ 	}
+ 
+ 	cPt := (*C.uchar)(C.CBytes(ptBytes))
+--- /dev/null
++++ b/plugins/vault/vault-plugin-abe/plugin/path_authority.go
+@@ -0,0 +1,27 @@
++package abe
++
++import (
++    "context"
++    "github.com/hashicorp/vault/sdk/framework"
++    "github.com/hashicorp/vault/sdk/logical"
++)
++
++// Public authority inspection never creates or rotates keys, and never exports MSK/signing secrets.
++func pathAuthority(b *abeBackend) *framework.Path {
++    return &framework.Path{
++        Pattern: "authority",
++        Operations: map[logical.Operation]framework.OperationHandler{
++            logical.ReadOperation: &framework.PathOperation{Callback: b.pathAuthorityRead},
++        },
++        HelpSynopsis: "Read public authority metadata without changing keys.",
++    }
++}
++
++func (b *abeBackend) pathAuthorityRead(ctx context.Context, req *logical.Request, _ *framework.FieldData) (*logical.Response, error) {
++    b.authorityMu.RLock()
++    defer b.authorityMu.RUnlock()
++    state, err := loadAuthority(ctx, req.Storage)
++    if err != nil { return nil, err }
++    if state == nil || len(state.MSK) == 0 { return nil, nil }
++    return state.publicResponse(), nil
++}
+--- /dev/null
++++ b/plugins/vault/vault-plugin-abe/plugin/path_authority_test.go
+@@ -0,0 +1,35 @@
++package abe
++
++import (
++    "context"
++    "crypto/sha256"
++    "fmt"
++    "strings"
++    "testing"
++    "github.com/hashicorp/vault/sdk/logical"
++)
++
++func TestPublicAuthorityRecoveryDoesNotReplaceKeys(t *testing.T) {
++    b, storage := newTestBackend(t)
++    state := &authorityState{Format: 1, Scheme: "covercrypt", Revision: 7,
++        PK: []byte("public-fixture"), MSK: []byte("master-fixture"),
++        PQCPublic: []byte("verify-fixture"), PQCSecret: []byte("sign-fixture")}
++    if err := saveAuthority(context.Background(), storage, state); err != nil { t.Fatal(err) }
++    before, _ := storage.Get(context.Background(), authorityKey)
++    response, err := b.HandleRequest(context.Background(), &logical.Request{
++        Operation: logical.ReadOperation, Path: "authority", Storage: storage,
++    })
++    if err != nil || response == nil || response.IsError() { t.Fatalf("authority read failed: %v", err) }
++    expected := fmt.Sprintf("vault-authority-sha256:%x", sha256.Sum256(state.PK))
++    if response.Data["public_key"] != expected { t.Fatal("incorrect public key reference") }
++    for _, key := range []string{"msk", "master_key", "secret_key", "pqc_private_key"} {
++        if _, found := response.Data[key]; found { t.Fatal("public response exposed secret field") }
++    }
++    after, _ := storage.Get(context.Background(), authorityKey)
++    if string(before.Value) != string(after.Value) { t.Fatal("authority read modified stored keys") }
++    denied := request(t, b, storage, "encrypt", map[string]interface{}{
++        "scheme":"covercrypt", "plaintext":"aGVsbG8=", "policy":"Department::IT",
++        "public_key":"vault-authority-sha256:" + strings.Repeat("0",64),
++    }, true)
++    if !strings.Contains(denied["error"].(string), "reference differs") { t.Fatal("wrong keyset not rejected") }
++}

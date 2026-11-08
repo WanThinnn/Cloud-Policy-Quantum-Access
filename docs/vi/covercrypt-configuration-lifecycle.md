@@ -12,6 +12,22 @@ Các `AccessPolicy` seed sẵn vẫn là đầu vào phân quyền và policy c�
 
 Compiler hỗ trợ so sánh chuỗi bằng `==`, membership trong literal list/tuple/set không rỗng, `and`, `or` và ngoặc. Nó kiểm tra dimension/value theo chính setup config đã validate. `!=` và `not in` bị từ chối: evaluator CPQA có thể xem attribute thiếu là khác giá trị, trong khi key CoverCrypt cần attribute dương để thỏa policy phủ định dạng bù. Compiler cũng từ chối so sánh thứ tự, chained comparison, phủ định đơn ngôi, literal không phải chuỗi và attribute chưa cấu hình.
 
+## Bypass tài liệu và chế độ strict
+
+Khi lớp ứng dụng đã cho phép bypass non-strict của administrator/owner,
+`services/covercrypt_policy.py` parse policy của version thành biểu thức Boolean
+dương có giới hạn, rồi chọn đúng một giá trị hợp lệ mỗi dimension để thỏa toàn
+bộ biểu thức. Dimension không bị ràng buộc dùng giá trị thật hợp lệ hoặc giá trị
+cấu hình xác định. Assignment chỉ dùng cấp khóa tạm, không sửa thuộc tính/policy
+trong DB. Biểu thức mâu thuẫn, sai cấu hình/cú pháp hoặc quá phức tạp bị từ chối.
+Helper này không tự cấp quyền ở lớp ứng dụng.
+
+Khóa bypass dùng namespace `covercrypt_bypass_v1` riêng, kèm user, assignment,
+fingerprint authority và backend. Khi bật `SUPER_ADMIN_REQUIRE_POLICY`, admin
+phải qua document authorization và dùng thuộc tính thật trong namespace strict,
+kể cả khi là owner. User thường không nhận assignment thỏa policy trừ khi có
+quyền owner bypass hiện hữu áp dụng rõ ràng.
+
 ## Discovery có phân quyền
 
 Sau `start.py initdata`, super administrator có thể xem setup document được sinh qua `GET /api/admin/covercrypt/configuration/`. Endpoint yêu cầu authentication và `IsSuperAdmin`; đây là API được hỗ trợ để review JSON. Client không query database trực tiếp.

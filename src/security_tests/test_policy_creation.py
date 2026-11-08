@@ -145,7 +145,7 @@ class InlinePolicyTests(TestCase):
         ) as crypto, patch(
             'crypto_access.services.clamav_service.clamav_service.scan_file_buffer', return_value=(True, 'clean')
         ), patch(
-            'crypto_access.views.storage.FileAccessPolicy.objects.create', side_effect=RuntimeError('assignment failure')
+            'crypto_access.views.storage.FileAccessPolicy.objects.get_or_create', side_effect=RuntimeError('assignment failure')
         ):
             crypto.encrypt_version.return_value = (b'ciphertext', {
                 'schema': 1, 'scheme': 'ac17', 'format': 'hybrid-v2', 'backend': 'native', 'pqc_signed': False,
