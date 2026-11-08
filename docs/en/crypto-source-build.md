@@ -63,20 +63,12 @@ legacy plugin storage reads in `plugin/authority.go`; following HEAD does not
 establish compatibility of every future revision with deployment data. Do not
 call setup to test an upgrade against existing authorities.
 
-The build applies `docker/patches/vault-authority-chunks.patch` to the upstream
-Vault plugin before `make vault`. This keeps the CPQA build compatible with the
-upstream Git HEAD while storing large CoverCrypt authorities as sub-1-MiB
-seal-wrapped values. The patch is checked before application; if upstream changes
-the authority storage implementation incompatibly, the crypto image build fails
-instead of silently shipping an unpatched plugin. Existing single-record
-authorities remain readable. See the [Vault contract](covercrypt-vault-contract.md)
-for the chunk manifest and commit behavior.
-
-The following `vault-covercrypt-public-reference.patch` adds a read-only public
-authority endpoint and fingerprint-bound CoverCrypt public-key references. Both
-web and Vault must use this contract; its checksum is recorded separately in
-`source.env`. See the [Vault contract](covercrypt-vault-contract.md) for safe
-recovery after authority creation succeeds but public metadata persistence fails.
+CPQA does not patch upstream source, headers, ABI, plugin endpoints or storage
+formats. Before calling the upstream Makefile, the build checks that tracked
+source matches HEAD. `source.env` records `CRYPTO_CPQA_PATCHES=none` alongside
+the resolved repository/commit/version. Required library changes must be made
+and tested in the library project, not injected during this application's build.
+See [upstream integration requirements](covercrypt-upstream-requirements.md).
 
 ## Verification and export
 

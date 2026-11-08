@@ -1,5 +1,7 @@
 # Kế hoạch tích hợp CoverCrypt
 
+> **2026-11-08 — Ranh giới upstream:** CPQA không được patch/sửa thư viện hoặc tự thêm API/serialization khi build. Các patch authority/reference đã gỡ; thay đổi lớn-key/recovery cần xử lý ở dự án lib. Giai đoạn 6–9 vẫn chưa hoàn tất. Các đánh dấu trước đây không thay thế kiểm chứng với plugin nguyên bản. Xem [yêu cầu upstream](../vi/covercrypt-upstream-requirements.md).
+
 [English](../en/covercrypt-integration-plan.md) · [Build source mật mã](crypto-source-build.md)
 
 ## Mục tiêu và phạm vi

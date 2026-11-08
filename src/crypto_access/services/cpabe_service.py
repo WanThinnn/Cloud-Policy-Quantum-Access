@@ -12,7 +12,7 @@ import requests
 import urllib3
 import hashlib
 import threading
-from .covercrypt_public_key import public_key_fingerprint, public_key_reference
+from .covercrypt_public_key import public_key_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +212,11 @@ class CPABEService:
         manifest_raw = state.get(COVERCRYPT_MANIFEST_KEY)
         init_marker = state.get(COVERCRYPT_INIT_MARKER_KEY)
         mount_created_marker = state.get(COVERCRYPT_MOUNT_CREATED_KEY)
+        if isinstance(public_key_b64, str) and public_key_b64.startswith('vault-authority-sha256:'):
+            raise CPABEError(
+                'This keyset uses a removed CPQA-only reference format. '
+                'A compatible migration must be supplied by the library project; authority was not changed.'
+            )
 
         if manifest_raw is not None:
             if not public_key_b64:
@@ -237,17 +242,11 @@ class CPABEService:
                 raise CPABEError(f"CoverCrypt keyset does not match the active configuration: {exc}") from exc
             return public_key_b64
 
-        recovering = init_marker is not None or public_key_b64 is not None or pqc_public_key_b64 is not None
-        if recovering:
-            # Only reconcile a failed first initialization belonging to this exact config.
-            # Read the existing authority; never repeat the destructive setup call.
-            try:
-                marker_data = json.loads(init_marker) if isinstance(init_marker, str) else init_marker
-            except ValueError:
-                marker_data = None
-            if (not isinstance(marker_data, dict) or marker_data.get('status') != 'initializing' or
-                    marker_data.get('config_fingerprint') != configuration.fingerprint):
-                raise CPABEError("CoverCrypt keyset state is incomplete; operator reconciliation is required.")
+        if init_marker is not None or public_key_b64 is not None or pqc_public_key_b64 is not None:
+            raise CPABEError(
+                'CoverCrypt initialization is incomplete. The upstream plugin has no read-only authority '
+                'recovery endpoint; reconcile through the library project before retrying. Setup was not repeated.'
+            )
 
         if mount_created_marker != COVERCRYPT_VAULT_MOUNT:
             raise CPABEError(
@@ -256,7 +255,7 @@ class CPABEService:
             )
 
         marker = json.dumps({"status": "initializing", "config_fingerprint": configuration.fingerprint})
-        if not recovering and not vault_service.claim_secret(COVERCRYPT_INIT_MARKER_KEY, marker):
+        if not vault_service.claim_secret(COVERCRYPT_INIT_MARKER_KEY, marker):
             raise CPABEError("CoverCrypt initialization is in progress or its guard could not be acquired; retry later.")
 
         payload = {
@@ -266,16 +265,10 @@ class CPABEService:
             "pqc": bool(pqc_enabled),
         }
         try:
-            if recovering:
-                response = requests.get(
-                    f"{vault_service.get_addr}/v1/{COVERCRYPT_VAULT_MOUNT}/authority",
-                    headers=headers, verify=self._vault_verify, timeout=120,
-                )
-            else:
-                response = requests.put(
-                    f"{vault_service.get_addr}/v1/{COVERCRYPT_VAULT_MOUNT}/setup",
-                    headers=headers, json=payload, verify=self._vault_verify, timeout=120,
-                )
+            response = requests.put(
+                f"{vault_service.get_addr}/v1/{COVERCRYPT_VAULT_MOUNT}/setup",
+                headers=headers, json=payload, verify=self._vault_verify, timeout=120,
+            )
             response.raise_for_status()
             data = response.json()["data"]
             if data.get("scheme") != "covercrypt" or not data.get("public_key"):
@@ -284,21 +277,21 @@ class CPABEService:
                 raise CPABEError("Vault CoverCrypt setup returned a different configuration or mode.")
 
             returned_pk = data["public_key"]
-            # Require the updated plugin contract before persisting anything. A legacy
-            # large Base64 response must not be sent back through the KV request limit.
-            if returned_pk != public_key_reference(returned_pk):
-                raise CPABEError("Upgrade the Vault plugin to support CoverCrypt public-key references.")
+            # Keep a conservative application-side KV budget. Do not change Vault
+            # storage or invent a transport to work around unsupported large authorities.
+            if not isinstance(returned_pk, str) or len(returned_pk) > 512 * 1024:
+                raise CPABEError(
+                    'CoverCrypt public key exceeds the supported Vault KV budget. '
+                    'Large-key support must be implemented in Hybrid-PQ-CP-ABE-Library.'
+                )
             key_fingerprint = public_key_fingerprint(returned_pk)
-            if public_key_b64 and public_key_fingerprint(public_key_b64) != key_fingerprint:
-                raise CPABEError("Recovered CoverCrypt authority differs from the recorded public key.")
             returned_pqc_pk = data.get("pqc_public_key")
             if pqc_enabled and not returned_pqc_pk:
                 raise CPABEError("Vault CoverCrypt setup did not return its requested verification key.")
             if returned_pqc_pk:
                 base64.b64decode(returned_pqc_pk, validate=True)
-            if (type(data.get('pqc')) is not bool or data['pqc'] != bool(returned_pqc_pk) or
-                    (pqc_public_key_b64 and pqc_public_key_b64 != returned_pqc_pk)):
-                raise CPABEError("Recovered CoverCrypt signature state is inconsistent.")
+            if type(data.get('pqc')) is not bool or data['pqc'] != bool(returned_pqc_pk):
+                raise CPABEError("CoverCrypt setup signature state is inconsistent.")
 
             manifest = build_keyset_manifest(
                 COVERCRYPT_KEYSET_ID,
@@ -535,9 +528,7 @@ class CPABEService:
             if current_scheme == 'tkn20' and tkn20_pk_b64:
                 self.pk_data = base64.b64decode(tkn20_pk_b64)
             elif current_scheme == 'covercrypt' and covercrypt_pk_b64:
-                # The plugin holds this large public key; CoverCrypt callers pass
-                # its verified reference instead of a native key buffer.
-                self.pk_data = b''
+                self.pk_data = base64.b64decode(covercrypt_pk_b64, validate=True)
             elif ac17_pk_b64:
                 self.pk_data = base64.b64decode(ac17_pk_b64)
 
@@ -935,6 +926,9 @@ class CPABEService:
                     raise CPABEError("CoverCrypt Vault authority signing state differs from the requested ciphertext mode.")
             else:
                 public_key = vault_service.get_secret(f'CPABE_PK_{scheme.upper()}')
+                verifier = vault_service.get_secret(f'PQC_PK_{scheme.upper()}')
+                if bool(verifier) != bool(pqc_signed):
+                    raise CPABEError('Requested signature mode differs from the upstream authority signing state.')
             if not public_key:
                 raise CPABEError('Public key for the requested scheme is unavailable.')
             payload = {
@@ -943,10 +937,8 @@ class CPABEService:
                 'policy': policy,
                 'public_key': public_key,
             }
-            # The upstream Vault plugin signs CoverCrypt whenever that authority
-            # has a stored ML-DSA key; its encrypt contract has no `sign` field.
-            if scheme != 'covercrypt':
-                payload['sign'] = pqc_signed
+            # The upstream plugin selects signing from its authority. It accepts
+            # no per-request `sign` flag and returns ciphertext only.
             response = requests.put(
                 f'{vault_service.get_addr}/v1/abe_{scheme}/encrypt',
                 headers={'X-Vault-Token': vault_service.get_token},
@@ -955,14 +947,10 @@ class CPABEService:
             )
             response.raise_for_status()
             result = response.json()['data']
-            if scheme == 'covercrypt':
-                data = base64.b64decode(result['ciphertext'], validate=True)
-                metadata = {'schema': 1, **inspect_header(data), 'pqc_signed': bool(verifier), 'backend': 'vault'}
-            elif 'crypto_metadata' not in result:
-                raise CPABEError('Vault ABE plugin must be upgraded to return per-version crypto metadata.')
-            else:
-                data = base64.b64decode(result['ciphertext'], validate=True)
-                metadata = validate_metadata(result['crypto_metadata'])
+            data = base64.b64decode(result['ciphertext'], validate=True)
+            metadata = validate_metadata({
+                'schema': 1, **inspect_header(data), 'pqc_signed': bool(verifier), 'backend': 'vault',
+            })
         else:
             operation = self.encrypt_buffer_and_sign if pqc_signed else self.encrypt_buffer
             data = operation(plaintext, policy, scheme=scheme)
@@ -1052,10 +1040,7 @@ class CPABEService:
                 "ciphertext": base64.b64encode(ciphertext).decode('utf-8'),
                 "secret_key": base64.b64encode(private_key_data).decode('utf-8'),
             }
-            if scheme != 'covercrypt':
-                payload['scheme'] = scheme
-                payload['public_key'] = vault_service.get_secret(f'CPABE_PK_{scheme.upper()}') or base64.b64encode(self.pk_data).decode('utf-8')
-            else:
+            if scheme == 'covercrypt':
                 self._ensure_covercrypt_keyset(bool(getattr(settings, 'ENABLE_PQC_FEATURES', False)), headers)
             try:
                 resp = requests.put(f"{vault_service.get_addr}/v1/abe_{scheme}/decrypt", headers=headers, json=payload, verify=self._vault_verify)
@@ -1178,18 +1163,13 @@ class CPABEService:
                           vault_service.get_secret(f'PQC_PK_{scheme.upper()}'))
             if not pqc_pk_b64:
                 raise CPABEError('The verification key for this version is unavailable.')
-            pk_b64 = (vault_service.get_secret(COVERCRYPT_PUBLIC_KEY_KEY) if scheme == 'covercrypt' else
-                      vault_service.get_secret(f'CPABE_PK_{scheme.upper()}') or base64.b64encode(self.pk_data).decode('utf-8'))
             
             payload = {
                 "ciphertext": base64.b64encode(ciphertext).decode('utf-8'),
                 "secret_key": base64.b64encode(sk_data).decode('utf-8'),
                 "pqc_public_key": pqc_pk_b64,
             }
-            if scheme != 'covercrypt':
-                payload['scheme'] = scheme
-                payload['public_key'] = pk_b64
-            else:
+            if scheme == 'covercrypt':
                 self._ensure_covercrypt_keyset(True, headers)
             try:
                 resp = requests.put(f"{vault_service.get_addr}/v1/abe_{scheme}/decrypt", headers=headers, json=payload, verify=self._vault_verify)

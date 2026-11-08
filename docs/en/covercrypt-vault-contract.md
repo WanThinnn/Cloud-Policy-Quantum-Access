@@ -24,8 +24,8 @@ The `data` above is the Vault HTTP response's `data` object. JSON strings such a
 ## Setup, persistence, and rotation semantics
 
 - `setup` is **not idempotent** and does not compare the request config with the stored config. The upstream handler describes it as replacing the mount authority, generates new keys, and unconditionally saves the new authority. A repeated setup can make ciphertext encrypted under the old public key undecryptable with newly issued keys. CPQA must perform a guarded first-time initialization, never call `setup` as a routine “ensure keys” operation, and surface an operator-controlled rotation path.
-- A CoverCrypt authority keeps the matching MSK, public key, optional ML-DSA keys, config JSON, mode, scheme, and revision together in Vault's seal-wrapped `msk/` storage. Small authorities use the legacy single record. Large authorities use immutable 768 KiB chunks plus a checksummed manifest committed last, because Vault rejects an individual storage value above 1 MiB. The manifest is the commit point; incomplete chunk writes are not made active. Chunk generations are retained after a manifest switch so in-flight readers are not broken. The response exposes public/configuration data but not the MSK.
-- A failed first setup leaves an initialization guard. Clear it only after confirming the mount has no saved authority and the KV keyset manifest/public keys are absent. For the current deployment, after rebuilding/restarting the stack, run `docker compose --project-directory . -f docker/docker-compose.yml exec web python manage.py covercrypt_config --recover-failed-initialization --confirm-no-authority --keyset-id primary --vault-mount abe_covercrypt`, then restart the `web` service to clear its in-memory Vault cache before retrying upload. The command refuses recovery if keyset metadata exists or the guard fingerprint does not match the active dimensions.
+- The upstream authority stores MSK, public key, optional signing keys, config, scheme and revision in its existing single JSON record under the seal-wrapped `msk/` prefix. CPQA does not change this storage format. Large configurations can exceed Vault storage limits.
+- A failed first setup leaves an application guard. Do not clear it based on missing KV metadata alone; the upstream project must provide safe recovery/inspection when authority persistence is uncertain.
 - `add_dimension` is an existing authority-growth operation. It updates the same authority/MSK and public key, preserves signing keys, increments revision, and returns updated config/mode. It is not equivalent to a full secret rotation and does not revoke already issued rights.
 - The Vault plugin accepts only JSON text that parses and has a usable dimensions array. Its Rust bridge denies unknown JSON fields. `dimensions` must be nonempty; each dimension requires a nonempty ASCII `name` and nonempty `attributes`; every attribute must be nonempty ASCII. `hierarchical` defaults to `false`; when true, attributes are ordered from lowest to highest. No explicit maximum dimension/attribute count or string length was found in the inspected bridge. The app should apply a bounded config size and rely on native validation for cryptographic validity.
 - A dimension's JSON object is `{ "name": "Department", "attributes": ["IT", "HR"], "hierarchical": false }`. At the root, the only recognized field is `dimensions`.
@@ -44,50 +44,24 @@ The library's v2 envelope has a scheme indicator byte: `0` AC17, `1` TKN20, and 
 
 The header identifies ciphertext format and ABE scheme; it does **not** record whether ML-DSA signing was enabled. The Vault `encrypt` response only returns `ciphertext`, so the caller must record signature mode from the exact key/configuration used for that encryption in the per-version metadata. For a version recorded as signed, decryption must provide the matching verification public key and require verification success. Never infer the signature mode from `CPABE_SCHEME`, the current `pqc` setting, or the ABE header.
 
-## CPQA public-key reference extension
+## Upstream-only integration
 
-CPQA applies `docker/patches/vault-covercrypt-public-reference.patch` after the
-authority-chunk patch. For CoverCrypt only, setup and dimension-growth responses
-return `public_key` as `vault-authority-sha256:<64 lowercase hex characters>`.
-This references the exact serialized public key retained in plugin storage.
-AC17/TKN20 and native C ABI serialization are unchanged. Legacy Base64 encryption
-requests remain supported by the plugin.
+CPQA builds the original upstream source without local patches, source rewrites,
+custom endpoints or serialization extensions. Public keys use the Base64 contract
+above. Encrypt has no per-request `sign` field and returns ciphertext only;
+CPQA records application metadata from the requested scheme, validated envelope
+and known authority signing state. A signing-state mismatch is rejected before
+encryption instead of pretending a client flag changes library behavior.
 
-`GET /v1/abe_covercrypt/authority` returns the existing public response: reference,
-config, mode, revision, signing state and optional ML-DSA verification public key.
-It never runs setup, writes authority state or exports MSK/signing secrets.
-Encrypt accepts the reference in `public_key`, requires CoverCrypt and an exact
-fingerprint match with the stored authority, and uses the stored public key.
-A different fingerprint is rejected before native encryption.
+The upstream plugin has no read-only public authority recovery endpoint. An
+interrupted setup is blocked; missing KV metadata does not establish that the
+mount is empty. Do not repeat setup or clear guards without independent operator
+verification. Large authority/public-key support and safe recovery require work
+in the library project: [upstream requirements](covercrypt-upstream-requirements.md).
 
-This avoids sending large public keys to KV and back to the encrypt API. The app
-schema with dimension cardinalities 4/3/6/4/5/6 produced a 35,952,472-byte key
-(47,936,632 bytes in Base64), exceeding Vault's default 33,554,432-byte HTTP request
-limit. Authority chunking alone does not solve this second boundary. KV now stores
-the compact reference, verification key and config/key fingerprint manifest.
-
-After an interrupted first initialization, CPQA may read `/authority` to finish
-public metadata persistence only if the guard matches the active configuration
-and provisioning recorded a newly created mount. It validates scheme, config,
-mode, reference, signing state and any recorded keys. Missing/unsupported reads
-or mismatches fail closed without another setup. Upgrade web and Vault together;
-preserve data/key volumes. Do not clear the guard when an authority exists.
-The deployment token needs read capability on `abe_covercrypt/authority`; the app
-does not automatically broaden ACLs.
-
-Initialization uses a durable KV v2 CAS guard: one worker claims it before setup;
-other workers cannot run setup. The guard has no lease/expiry, so a crashed or
-timed-out initializer cannot be replaced automatically while its request may
-still be executing. Public reference, verifier, manifest and completed guard are
-published in one CAS-protected KV revision. Native CoverCrypt uses the same
-claim/atomic-publication rules. Related state is read from a fresh, consistent
-Vault revision, bypassing worker caches; Vault outages are errors, not absent keys.
-
-`VaultService.put_secret` merges with CAS and at most eight conflict retries,
-rereading the latest record for every retry. Non-CAS errors are not retried;
-deleted/destroyed records are not recreated as empty records. Least-privilege
-deployment tokens need the appropriate KV data read/create/update capabilities
-and metadata read to distinguish an absent path from unavailable/deleted state.
+CPQA rejects public-key payloads above a conservative 512-KiB application KV
+budget before attempting to persist them. This is not a new library encoding or
+a claim that all smaller authority configurations fit Vault's storage limits.
 
 ## Error behavior
 

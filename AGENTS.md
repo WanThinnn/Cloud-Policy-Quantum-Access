@@ -10,6 +10,8 @@
 
 ## Quy ước triển khai
 
+- Thư viện native/Vault từ `Hybrid-PQ-CP-ABE-Library` là contract upstream phải tuân thủ. Không tự tạo hoặc áp patch, sửa source/header/ABI, thêm endpoint hay thay serialization của lib trong repo CPQA hoặc lúc Docker build. Nếu integration bị chặn do khả năng/giới hạn của lib, báo rõ yêu cầu cần cập nhật tại dự án thư viện; không tự tạo contract thay thế. Checkout local của chủ dự án để đối chiếu là `D:\Documents\ABE\Hybrid-CP-ABE-Library`; Docker vẫn lấy source từ upstream theo cấu hình hiện tại.
+
 - Backend là Django/DRF trong `src/`; đặt logic nghiệp vụ dùng lại trong `crypto_access/services/`, validation/API contract trong serializers, endpoint trong views và urls tương ứng.
 - Models, serializers, views và urls đều chia theo miền nghiệp vụ. Kiểm tra `__init__.py` tương ứng khi thêm hoặc đổi tên thành phần được export.
 - Giao diện dùng Django templates và JavaScript thuần; không mặc định đây là ứng dụng React/Next.js. Sửa nguồn Tailwind ở `src/theme/static_src/src/styles.css`; CSS build nằm trong `src/theme/static/css/dist/`.

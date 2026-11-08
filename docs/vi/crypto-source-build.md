@@ -59,20 +59,11 @@ và public keys KV. Upstream 6.0.0 có nhánh đọc storage plugin cũ trong
 tương thích dữ liệu deployment. Không gọi setup để thử nâng cấp trên authority
 đang có dữ liệu.
 
-Trước `make vault`, build áp dụng patch
-`docker/patches/vault-authority-chunks.patch` lên Vault plugin upstream. Cách này
-giữ CPQA theo Git HEAD upstream nhưng lưu authority CoverCrypt lớn thành các giá
-trị seal-wrap nhỏ hơn 1 MiB. Patch được kiểm tra trước khi áp dụng; nếu upstream
-đổi storage authority theo cách không tương thích, build crypto sẽ dừng thay vì
-âm thầm tạo plugin chưa được vá. Authority dạng một bản ghi hiện có vẫn đọc được.
-Xem [contract Vault](covercrypt-vault-contract.md) về manifest chunk và cách
-commit.
-
-Patch tiếp theo `vault-covercrypt-public-reference.patch` thêm endpoint chỉ đọc
-public authority và reference public key CoverCrypt gắn fingerprint. Web/Vault
-phải dùng cùng contract; checksum patch được ghi riêng trong `source.env`.
-Xem [contract Vault](covercrypt-vault-contract.md) về phục hồi khi authority đã
-tạo thành công nhưng ghi public metadata thất bại.
+CPQA không patch source, header, ABI, endpoint hoặc storage của upstream.
+Trước Makefile gốc, build kiểm tra tracked source còn khớp HEAD. `source.env`
+ghi `CRYPTO_CPQA_PATCHES=none` cùng repository/commit/version thực tế. Thay đổi
+cần thiết ở lib phải thực hiện và kiểm thử tại dự án lib, không chèn khi build
+ứng dụng. Xem [yêu cầu upstream](covercrypt-upstream-requirements.md).
 
 ## Kiểm thử và export
 

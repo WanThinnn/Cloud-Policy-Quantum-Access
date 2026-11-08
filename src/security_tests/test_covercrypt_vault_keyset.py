@@ -9,7 +9,7 @@ import requests
 from django.test import SimpleTestCase
 
 from crypto_access.services import cpabe_service as module
-from crypto_access.services.covercrypt_public_key import public_key_fingerprint, public_key_reference
+from crypto_access.services.covercrypt_public_key import public_key_fingerprint
 
 
 class CoverCryptVaultKeysetTests(SimpleTestCase):
@@ -19,7 +19,7 @@ class CoverCryptVaultKeysetTests(SimpleTestCase):
             dimensions=[{'name': 'department', 'attributes': ['it', 'hr'], 'hierarchical': False}],
             config_json='{"dimensions":[{"attributes":["it","hr"],"hierarchical":false,"name":"department"}]}',
         )
-        self.reference = public_key_reference(base64.b64encode(b'public-only-fixture').decode())
+        self.reference = base64.b64encode(b'public-only-fixture').decode()
         self.state = {module.COVERCRYPT_MOUNT_CREATED_KEY: 'abe_covercrypt'}
         self.vault = Mock()
         self.vault.get_addr = 'https://vault.test'
@@ -65,7 +65,7 @@ class CoverCryptVaultKeysetTests(SimpleTestCase):
     def ensure(self, signed=False):
         return self.service._ensure_covercrypt_keyset(signed, {})
 
-    def test_first_setup_persists_compact_reference_and_fingerprint(self):
+    def test_first_setup_persists_upstream_base64_and_fingerprint(self):
         self.assertEqual(self.ensure(), self.reference)
         manifest = json.loads(self.state[module.COVERCRYPT_MANIFEST_KEY])
         self.assertEqual(manifest['public_key_fingerprint'], public_key_fingerprint(self.reference))
@@ -75,18 +75,17 @@ class CoverCryptVaultKeysetTests(SimpleTestCase):
 
     def test_oversized_legacy_response_is_not_written_to_kv(self):
         self.data['public_key'] = base64.b64encode(b'p' * (2 * 1024 * 1024)).decode()
-        with self.assertRaisesRegex(module.CPABEError, 'Upgrade the Vault plugin'):
+        with self.assertRaisesRegex(module.CPABEError, 'Hybrid-PQ-CP-ABE-Library'):
             self.ensure()
         self.assertNotIn(module.COVERCRYPT_PUBLIC_KEY_KEY, self.state)
         self.assertNotIn(module.COVERCRYPT_MANIFEST_KEY, self.state)
 
-    def test_incomplete_setup_recovers_existing_authority_without_setup(self):
+    def test_incomplete_setup_does_not_invent_recovery_endpoint(self):
         self.recovering()
-        self.assertEqual(self.ensure(), self.reference)
+        with self.assertRaisesRegex(module.CPABEError, 'initialization is incomplete'):
+            self.ensure()
         self.put.assert_not_called()
-        self.assertTrue(self.get.call_args.args[0].endswith('/authority'))
-        self.assertEqual(self.ensure(), self.reference)
-        self.assertEqual(self.get.call_count, 1)
+        self.get.assert_not_called()
 
     def test_missing_authority_never_triggers_replacement_setup(self):
         self.recovering()
@@ -97,22 +96,20 @@ class CoverCryptVaultKeysetTests(SimpleTestCase):
         self.assertNotIn(module.COVERCRYPT_MANIFEST_KEY, self.state)
 
     def test_configuration_mismatch_never_writes_metadata(self):
-        self.recovering()
         self.data['config_json'] = '{}'
         with self.assertRaises(module.CPABEError):
             self.ensure()
         self.vault.put_secrets.assert_not_called()
-        self.put.assert_not_called()
+        self.get.assert_not_called()
 
     def test_different_recorded_key_is_not_overwritten(self):
         self.recovering()
         self.state[module.COVERCRYPT_PUBLIC_KEY_KEY] = base64.b64encode(b'other').decode()
-        with self.assertRaisesRegex(module.CPABEError, 'differs from the recorded public key'):
+        with self.assertRaisesRegex(module.CPABEError, 'initialization is incomplete'):
             self.ensure()
         self.vault.put_secrets.assert_not_called()
 
     def test_signature_state_mismatch_is_rejected(self):
-        self.recovering()
         self.data['pqc'] = True
         with self.assertRaisesRegex(module.CPABEError, 'signature state'):
             self.ensure()
@@ -126,7 +123,7 @@ class CoverCryptVaultKeysetTests(SimpleTestCase):
         self.get.assert_not_called()
         self.put.assert_not_called()
 
-    def test_reference_parser_rejects_malformed_and_preserves_legacy_hash(self):
+    def test_parser_rejects_private_references_and_preserves_upstream_hash(self):
         raw = b'public-only-fixture'
         self.assertEqual(public_key_fingerprint(self.reference), hashlib.sha256(raw).hexdigest())
         self.assertEqual(public_key_fingerprint(base64.b64encode(raw).decode()), hashlib.sha256(raw).hexdigest())
@@ -134,27 +131,35 @@ class CoverCryptVaultKeysetTests(SimpleTestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 public_key_fingerprint(value)
 
-    def test_signed_authority_recovery_preserves_verification_key(self):
-        self.recovering()
+    def test_signed_setup_preserves_verification_key(self):
         self.data['pqc'] = True
         verifier = base64.b64encode(b'public-verification-fixture').decode()
         self.data['pqc_public_key'] = verifier
         self.assertEqual(self.ensure(signed=True), self.reference)
         self.assertEqual(self.state[module.COVERCRYPT_PQC_PUBLIC_KEY_KEY], verifier)
         self.assertTrue(json.loads(self.state[module.COVERCRYPT_MANIFEST_KEY])['pqc_enabled'])
-        self.put.assert_not_called()
+        self.get.assert_not_called()
 
     def test_cache_identity_uses_reference_fingerprint(self):
         self.ensure()
         identity = self.service.covercrypt_cache_identity()
         self.assertEqual(identity, self.configuration.fingerprint + ':' + public_key_fingerprint(self.reference))
 
+    def test_previously_patched_keyset_requires_explicit_upstream_migration(self):
+        self.ensure()
+        self.put.reset_mock()
+        self.state[module.COVERCRYPT_PUBLIC_KEY_KEY] = 'vault-authority-sha256:' + 'a' * 64
+        with self.assertRaisesRegex(module.CPABEError, 'compatible migration'):
+            self.ensure()
+        self.put.assert_not_called()
+        self.get.assert_not_called()
+
     def test_recorded_verifier_cannot_be_replaced_during_recovery(self):
         self.recovering()
         self.data['pqc'] = True
         self.data['pqc_public_key'] = base64.b64encode(b'new-verifier-fixture').decode()
         self.state[module.COVERCRYPT_PQC_PUBLIC_KEY_KEY] = base64.b64encode(b'old-verifier-fixture').decode()
-        with self.assertRaisesRegex(module.CPABEError, 'signature state'):
+        with self.assertRaisesRegex(module.CPABEError, 'initialization is incomplete'):
             self.ensure(signed=True)
         self.vault.put_secrets.assert_not_called()
 

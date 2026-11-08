@@ -11,6 +11,16 @@ import start
 
 
 class CryptoUpdateTests(unittest.TestCase):
+    def test_build_consumes_unmodified_upstream_source(self):
+        root = Path(__file__).resolve().parents[1]
+        build = (root / 'docker/build-crypto.sh').read_text(encoding='utf-8')
+        dockerfile = (root / 'docker/Dockerfile').read_text(encoding='utf-8')
+        self.assertNotIn('git apply', build)
+        self.assertNotIn('COPY docker/patches/', dockerfile)
+        self.assertFalse(list((root / 'docker/patches').glob('*.patch')))
+        self.assertIn('git diff --quiet HEAD --', build)
+        self.assertIn('CRYPTO_CPQA_PATCHES=none', build)
+
     def invoke(self, args, fail_on=None):
         calls = []
 
