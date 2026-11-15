@@ -37,7 +37,7 @@ class UserPublicKeyViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def active_key(self, request):
         """Get the current active key for the user"""
-        key = self.get_queryset().filter(status='active').order_by('-created_at').first()
+        key = UserPublicKey.objects.filter(user=request.user, status='active').order_by('-created_at').first()
         if not key:
             return Response({'error': 'No active key found'}, status=status.HTTP_404_NOT_FOUND)
         serializer = self.get_serializer(key)

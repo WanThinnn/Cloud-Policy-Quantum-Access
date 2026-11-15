@@ -2,51 +2,6 @@
 
 {% block title %}Manage Security Keys - Cloud Policy Crypto Access{% endblock %}
 
-{% block extra_js %}
-<!-- PQC Create Warning Modal -->
-<div id="pqc-create-warning-modal" tabindex="-1" class="hidden fixed inset-0 z-50 w-full h-full bg-gray-900/80 flex justify-center items-start pt-16" style="backdrop-filter: blur(8px);">
-    <div class="relative p-4 w-full max-w-md">
-        <div class="relative bg-white rounded-lg shadow dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
-            <div class="flex items-center justify-between p-4 md:p-5 border-b rounded-t dark:border-gray-700">
-                <h3 class="text-xl font-semibold text-gray-900 dark:text-white">
-                    Create PQC Signature Key
-                </h3>
-                <button type="button" class="text-gray-400 bg-transparent hover:bg-gray-200 hover:text-gray-900 rounded-lg text-sm w-8 h-8 ms-auto inline-flex justify-center items-center dark:hover:bg-gray-600 dark:hover:text-white" id="btn-pqc-create-cancel">
-                    <svg class="w-3 h-3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 14 14">
-                        <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 6 6m0 0 6 6M7 7l6-6M7 7l-6 6"/>
-                    </svg>
-                    <span class="sr-only">Close modal</span>
-                </button>
-            </div>
-            <div class="p-4 md:p-5 space-y-4">
-                <p class="text-sm text-gray-500 dark:text-gray-400">You are about to create a new Dual-Layer PQC Signature Key. Please read the following before proceeding:</p>
-                
-                <div class="bg-yellow-50 border-l-4 border-yellow-400 p-3 mt-3 mb-3 dark:bg-yellow-900/30 dark:border-yellow-600 rounded-r-md">
-                    <p class="text-xs text-yellow-700 dark:text-yellow-200 mb-2">
-                        <strong>⚠️ IMPORTANT — Where to save:</strong> When the browser prompts you to save the Passkey, you <b>MUST</b> select your device's built-in security:
-                    </p>
-                    <ul class="text-xs text-yellow-700 dark:text-yellow-200 ml-4 list-disc space-y-1 mb-2">
-                        <li><strong>Windows:</strong> Select <b>"Windows Hello"</b> (fingerprint, PIN, or face recognition)</li>
-                        <li><strong>macOS:</strong> Select <b>"This Device"</b> or <b>Touch ID</b></li>
-                    </ul>
-                    <p class="text-xs text-red-600 dark:text-red-400 font-semibold mb-2">
-                        ❌ Do <b>NOT</b> select Google Password Manager, iCloud Keychain, 1Password, Bitwarden, or any other Password Manager. They do not reliably support the PRF encryption required for PQC signatures.
-                    </p>
-                    <p class="text-xs text-yellow-700 dark:text-yellow-200">
-                        <strong>Cross-Browser:</strong> If you use multiple browsers on this computer, only modern browsers (Edge/Chrome) can share the TPM hardware Passkey seamlessly.
-                    </p>
-                </div>
-
-                
-                <button id="btn-pqc-create-confirm" class="w-full text-white bg-indigo-600 hover:bg-indigo-700 focus:ring-4 focus:outline-none focus:ring-indigo-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-indigo-600 dark:hover:bg-indigo-700 dark:focus:ring-indigo-800">
-                    I Understand, Create Key
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}
-
 {% block content %}
 <div class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
     <div class="px-4 py-6 sm:px-0">
@@ -96,6 +51,10 @@
                             + Create New
                         </button>
                     </div>
+                </div>
+                <div class="px-6 pb-4">
+                    <button id="btn-replace-recovery" type="button" class="text-sm text-indigo-600 hover:underline">Replace Recovery Phrase</button>
+                    <p id="replace-recovery-status" role="status" class="text-sm text-red-600"></p>
                 </div>
                 <div class="flex-grow">
                     <ul id="pqc-keys-list" class="divide-y divide-gray-200 dark:divide-gray-700">
@@ -181,49 +140,7 @@
             }
         });
         
-        document.getElementById('btn-add-pqc-key').addEventListener('click', async () => {
-            if (typeof pqcManager === 'undefined') {
-                alert('PQC Manager not loaded.');
-                return;
-            }
-            document.getElementById('pqc-create-warning-modal').classList.remove('hidden');
-        });
-        
-        document.getElementById('btn-pqc-create-cancel').addEventListener('click', () => {
-            document.getElementById('pqc-create-warning-modal').classList.add('hidden');
-        });
-        
-        document.getElementById('btn-pqc-create-confirm').addEventListener('click', async () => {
-            document.getElementById('pqc-create-warning-modal').classList.add('hidden');
-            
-            try {
-                const mnemonic = await pqcManager.setup();
-                
-                // Trigger download of recovery phrase file
-                const text = "Cloud Policy Crypto Access - PQC Signature Recovery Phrase\n" +
-                             "WARNING: DO NOT SHARE THIS FILE WITH ANYONE.\n\n" +
-                             mnemonic.join(' ');
-                const blob = new Blob([text], { type: 'text/plain' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                const username = localStorage.getItem('username') || 'unknown_user';
-                a.download = `cloud-policy-pqc-recovery-${username}.txt`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-                
-                alert('PQC Signature Key created successfully! \n\nA text file with your recovery phrase has been downloaded. IMPORTANT: Please save it in a secure place.');
-                loadKeys();
-            } catch (err) {
-                console.error(err);
-                if (err.name === 'NotAllowedError' || err.message.includes('not allowed') || err.message.includes('cancelled')) {
-                    return; // User cancelled
-                }
-                alert('Error creating PQC Signature Key: ' + err.message);
-            }
-        });
+        document.getElementById('btn-add-pqc-key').addEventListener('click', () => openPqcSetup());
 
         document.getElementById('btn-import-pqc-key').addEventListener('click', () => {
             const recoverModal = document.getElementById('pqc-recover-modal');
@@ -231,9 +148,26 @@
                 recoverModal.classList.remove('hidden');
             }
         });
+
+        const replaceRecovery = document.getElementById('btn-replace-recovery');
+        const recoveryStatus = document.getElementById('replace-recovery-status');
+        replaceRecovery.addEventListener('click', async () => {
+            recoveryStatus.textContent = '';
+            replaceRecovery.disabled = true;
+            try {
+                if (!await pqcManager.hasKeySetup()) throw new Error('Create a signing key first.');
+                await requirePqcUnlock();
+                const { mnemonic, save } = await pqcManager.prepareRecoveryReplacement();
+                showRecoveryPhrase(mnemonic, save);
+            } catch (error) {
+                recoveryStatus.textContent = error.message;
+            } finally {
+                replaceRecovery.disabled = false;
+            }
+        });
         
-        document.addEventListener('pqcKeyRecovered', function() {
-            alert('PQC Signature Key imported successfully to this device!');
+        document.addEventListener('pqcKeyRecovered', function(event) {
+            alert(event.detail.replacedPasskey ? 'Signing passkey replaced.' : 'Signing key unlocked for this session.');
             loadKeys();
         });
     });

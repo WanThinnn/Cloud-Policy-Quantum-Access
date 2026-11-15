@@ -17,6 +17,23 @@ class UserPublicKeySerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['user', 'status', 'ca_signature', 'created_at', 'updated_at']
 
+    def validate(self, attrs):
+        primary_field = 'encrypted_pqc_sk_primary'
+        credential_field = 'credential_id'
+        if self.instance is not None and (primary_field in attrs or credential_field in attrs):
+            if (primary_field not in attrs or credential_field not in attrs or
+                    bool(attrs[primary_field]) != bool(attrs[credential_field])):
+                raise serializers.ValidationError('Update the signing passkey credential ID and encrypted key together.')
+        return attrs
+
+    def update(self, instance, validated_data):
+        # A phrase replacement must not overwrite a concurrent passkey rebind (or vice versa).
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        if validated_data:
+            instance.save(update_fields=[*validated_data, 'updated_at'])
+        return instance
+
     def create(self, validated_data):
         from ..services.pki_service import PKIService
         from django.utils import timezone

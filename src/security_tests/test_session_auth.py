@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from crypto_access.authentication import CookieJWTAuthentication
-from crypto_access.models import ActiveSession, UserProfile
+from crypto_access.models import ActiveSession, UserProfile, UserPublicKey
 from crypto_access.views.pki import UserPublicKeyViewSet
 from crypto_access.views.storage import UploadedFileViewSet
 from crypto_access.views.session_views import SessionViewSet
@@ -74,6 +74,37 @@ class SessionAuthenticationTests(TestCase):
     def test_session_must_belong_to_the_token_user(self):
         access, _, _ = self.credentials(owner=self.other)
         self.assertEqual(self.client_for(access, 'bearer').get('/api/pki/keys/my_keys/').status_code, 401)
+
+    def test_signing_passkey_rebind_updates_ciphertext_and_credential_together(self):
+        access, _, _ = self.credentials()
+        client = self.client_for(access, 'bearer')
+        signing_key = UserPublicKey.objects.create(
+            user=self.user, pqc_public_key='public-fixture',
+            credential_id='AQID', encrypted_pqc_sk_primary='original-fixture',
+        )
+        url = f'/api/pki/keys/{signing_key.pk}/'
+        result = client.patch(url, {'encrypted_pqc_sk_primary': 'replacement-fixture'}, format='json')
+        self.assertEqual(result.status_code, 400)
+        signing_key.refresh_from_db()
+        self.assertEqual(signing_key.encrypted_pqc_sk_primary, 'original-fixture')
+        result = client.patch(url, {
+            'credential_id': 'BAUG', 'encrypted_pqc_sk_primary': 'replacement-fixture',
+        }, format='json')
+        self.assertEqual(result.status_code, 200)
+        active = client.get('/api/pki/keys/active_key/')
+        self.assertEqual(active.data['credential_id'], 'BAUG')
+        self.assertEqual(active.data['encrypted_pqc_sk_primary'], 'replacement-fixture')
+
+    def test_active_signing_key_is_scoped_to_the_signed_in_admin(self):
+        self.user.is_superuser = True
+        self.user.save(update_fields=['is_superuser'])
+        access, _, _ = self.credentials()
+        client = self.client_for(access, 'bearer')
+        own = UserPublicKey.objects.create(user=self.user, pqc_public_key='own-fixture')
+        UserPublicKey.objects.create(user=self.other, pqc_public_key='other-fixture')
+        active = client.get(f'/api/pki/keys/active_key/?user={self.other.pk}')
+        self.assertEqual(active.status_code, 200)
+        self.assertEqual(active.data['id'], own.pk)
 
     def test_refresh_cannot_revive_a_revoked_session(self):
         client = APIClient()
