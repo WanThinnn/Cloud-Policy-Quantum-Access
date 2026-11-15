@@ -116,7 +116,11 @@ class VaultService:
         """Commit related metadata fields together in a single KV revision."""
         return self._merge_secrets(values)
 
-    def _merge_secrets(self, values, *, absent_key=None):
+    def compare_and_put_secrets(self, expected, values):
+        """Replace related authority metadata only if its source snapshot still matches."""
+        return self._merge_secrets(values, expected=expected)
+
+    def _merge_secrets(self, values, *, absent_key=None, expected=None):
         if not self.is_authenticated():
             logger.warning("Vault client is not authenticated. Cannot write secret.")
             return False
@@ -125,6 +129,8 @@ class VaultService:
             for _ in range(8):
                 current_data, version = self._read_record()
                 if absent_key is not None and current_data.get(absent_key) is not None:
+                    return False
+                if expected is not None and any(current_data.get(key) != value for key, value in expected.items()):
                     return False
                 current_data.update(values)
                 try:

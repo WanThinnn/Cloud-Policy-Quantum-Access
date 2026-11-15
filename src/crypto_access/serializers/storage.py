@@ -22,6 +22,10 @@ class StorageBucketSerializer(serializers.ModelSerializer):
         return obj.files.count()
 
 
+class RestoreFileVersionSerializer(serializers.Serializer):
+    version_number = serializers.IntegerField(min_value=1, max_value=2147483647)
+
+
 class UploadedFileSerializer(serializers.ModelSerializer):
     bucket_name = serializers.CharField(source='bucket.name', read_only=True)
     file_size_display = serializers.CharField(source='get_file_size_display', read_only=True)

@@ -71,6 +71,9 @@ class TKN20PolicyTests(SimpleTestCase):
 
 class TKN20DecryptionBypassTests(SimpleTestCase):
     def setUp(self):
+        generation = patch('crypto_access.models.KeyRevocation.user_cache_generation', return_value=0)
+        generation.start()
+        self.addCleanup(generation.stop)
         setting_patch = patch('crypto_access.services.document_access.get_runtime_setting', return_value=False)
         self.strict_setting = setting_patch.start()
         self.addCleanup(setting_patch.stop)

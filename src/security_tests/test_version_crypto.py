@@ -14,7 +14,7 @@ from django.core.management import call_command, CommandError
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from crypto_access.models import AccessPolicy, FileAccessPolicy, FileVersion, StorageBucket, UploadedFile, UserProfile
+from crypto_access.models import AccessPolicy, FileAccessPolicy, FileVersion, KeyRevocation, StorageBucket, UploadedFile, UserProfile
 from crypto_access.views import storage as storage_views
 
 
@@ -103,6 +103,36 @@ class VersionCryptoTests(TestCase):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, getattr(response, 'data', None))
             self.assertEqual(response.content, b'version-1')
+
+    def test_revocation_rotates_cache_even_when_attributes_are_unchanged(self):
+        self.version(1, 'ac17')
+        url = f'/api/storage/files/{self.file.pk}/download/?version=1'
+        with patch.object(self.crypto, 'generate_user_key', wraps=self.crypto.generate_user_key) as generate:
+            self.assertEqual(self.client.get(url).status_code, 200)
+            self.assertEqual(self.client.get(url).status_code, 200)
+            self.assertEqual(generate.call_count, 1)
+            KeyRevocation.revoke_user_key(user=self.admin, key_id='fixture', reason='manual')
+            self.assertEqual(self.client.get(url).status_code, 200)
+            self.assertEqual(generate.call_count, 2)
+
+    def test_rename_and_trash_restore_preserve_every_version(self):
+        first = self.version(1, 'ac17', signed=True)
+        second = self.version(2, 'tkn20')
+        response = self.client.post('/api/storage/files/rename_item/', {
+            'old_path': 'report.txt', 'new_name': 'renamed.txt', 'type': 'file', 'bucket_name': 'documents',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        UploadedFile.objects.filter(pk=self.file.pk).update(is_deleted=True)
+        response = self.client.post(f'/api/storage/files/{self.file.pk}/restore/')
+        self.assertEqual(response.status_code, 200, response.data)
+        for version in (first, second):
+            old_metadata = version.crypto_metadata
+            old_physical_path = version.physical_path
+            version.refresh_from_db()
+            self.assertEqual(version.crypto_metadata, old_metadata)
+            self.assertEqual(version.physical_path, old_physical_path)
+            result = self.client.get(f'/api/storage/files/{self.file.pk}/download/?version={version.version_number}')
+            self.assertEqual(result.content, f'version-{version.version_number}'.encode())
 
     def test_signature_mode_does_not_follow_the_current_feature_flag(self):
         self.version(1, 'ac17', signed=True)
@@ -199,6 +229,13 @@ class VersionCryptoTests(TestCase):
     def test_metadata_ciphertext_mismatch_is_rejected(self):
         old = self.version(1, 'ac17')
         FileVersion.objects.filter(pk=old.pk).update(crypto_metadata=metadata('tkn20'))
+        response = self.client.get('/api/storage/files/preview_by_path/?bucket=documents&path=report.txt')
+        self.assertEqual(response.status_code, 409)
+
+    def test_encrypted_policy_rejects_plaintext_metadata(self):
+        from crypto_access.services.version_crypto import PLAINTEXT_METADATA
+        old = self.version(1, 'ac17')
+        FileVersion.objects.filter(pk=old.pk).update(crypto_metadata=PLAINTEXT_METADATA)
         response = self.client.get('/api/storage/files/preview_by_path/?bucket=documents&path=report.txt')
         self.assertEqual(response.status_code, 409)
 

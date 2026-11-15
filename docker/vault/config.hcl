@@ -8,6 +8,7 @@ api_addr = "https://127.0.0.1:8200"
 cluster_addr = "https://127.0.0.1:8201"
 
 listener "tcp" {
+  max_request_duration = "300s"
   address       = "0.0.0.0:8200"
   tls_disable   = 0
   tls_cert_file = "/vault/config/certs/_.cyberfortress.local.crt"

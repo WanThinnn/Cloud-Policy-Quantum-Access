@@ -415,6 +415,13 @@ ABAC_PROTECTED_ROUTES = [
             'GET': 'download',
         }
     },
+    {
+        'pattern': r'^/api/storage/files/\d+/restore_version/',
+        'resource': 'document',
+        'methods': {
+            'POST': 'update',
+        }
+    },
     # Generic pattern LAST as fallback
     {
         'pattern': r'^/api/storage/files/\d+/',

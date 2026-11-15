@@ -826,7 +826,7 @@
 {% block extra_js %}
 <script src="{% static 'js/policy-builder.js' %}?v=4"></script>
 <script>window.MAX_UPLOAD_SIZE_MB = {{ upload_max_size_mb|default:10 }};</script>
-<script src="{% static 'js/files-manager.js' %}?v=38"></script>
+<script src="{% static 'js/files-manager.js' %}?v=39"></script>
 <!-- Hidden form for version upload -->
 <input type="file" id="version-file-input" class="hidden" onchange="handleVersionUpload(event)">
 

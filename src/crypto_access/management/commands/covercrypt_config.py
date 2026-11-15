@@ -1,114 +1,70 @@
-"""Inspect or explicitly persist CoverCrypt keyset metadata."""
-
+"""Inspect configuration or reconcile verified public metadata; never clear guards."""
 import json
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from crypto_access.services.covercrypt_config import (
-    CoverCryptConfigurationError,
-    build_covercrypt_configuration,
-    build_keyset_manifest,
-    manifest_key,
-    verify_keyset_manifest,
-)
+from crypto_access.services.covercrypt_config import build_covercrypt_configuration, validate_vault_mount
+from crypto_access.services.cpabe_service import COVERCRYPT_MANIFEST_KEY, COVERCRYPT_VAULT_MOUNT, CPABEService
 from crypto_access.services.vault_service import vault_service
 
 
 class Command(BaseCommand):
-    help = "Validate the deployment-owned CoverCrypt configuration and keyset manifest."
+    help = 'Inspect, initialize, reconcile or promote CoverCrypt Vault authorities.'
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            "--check-vault",
-            action="store_true",
-            help="Require a compatible manifest for the configured CoverCrypt keyset in Vault.",
-        )
-        parser.add_argument(
-            "--write-manifest",
-            action="store_true",
-            help="Explicitly write the non-secret manifest; never creates or rotates a Vault authority.",
-        )
-        parser.add_argument(
-            "--recover-failed-initialization",
-            action="store_true",
-            help="Clear a matching incomplete first-setup guard after operator verification.",
-        )
-        parser.add_argument(
-            "--confirm-no-authority",
-            action="store_true",
-            help="Confirm the CoverCrypt Vault mount contains no authority and can safely be initialized.",
-        )
-        parser.add_argument("--keyset-id", help="The operator-approved identifier for this Vault authority.")
-        parser.add_argument("--vault-mount", help="The Vault mount containing this authority, without a trailing slash.")
+        parser.add_argument('--check-vault', action='store_true', help='Read and validate the recorded manifest and live public authority.')
+        parser.add_argument('--initialize-vault', action='store_true', help='Initialize a newly provisioned CoverCrypt mount with the create-only guard.')
+        parser.add_argument('--rotate-vault', action='store_true', help='Promote a pre-provisioned authority on a separate mount and retain the current authority.')
+        parser.add_argument('--expected-fingerprint', help='Current authority fingerprint required for promotion.')
+        parser.add_argument('--reconcile-vault', action='store_true', help='Read the existing authority and atomically repair matching public KV metadata. Never calls setup.')
+        parser.add_argument('--write-manifest', action='store_true', help='Alias for --reconcile-vault; no unverified manifest writes.')
+        parser.add_argument('--recover-failed-initialization', action='store_true', help='Retired unsafe guard-clearing option; use --reconcile-vault.')
+        parser.add_argument('--confirm-no-authority', action='store_true', help='Retired option; a missing authority response does not authorize clearing a guard.')
+        parser.add_argument('--keyset-id', help='Approved keyset identifier (currently primary).')
+        parser.add_argument('--vault-mount', help='Current mount for checks or new mount for rotation.')
 
     def handle(self, *args, **options):
+        if options['recover_failed_initialization'] or options['confirm_no_authority']:
+            raise CommandError('Clearing initialization guards is no longer supported. Use --reconcile-vault; a missing authority fails closed.')
         try:
             configuration = build_covercrypt_configuration()
-        except CoverCryptConfigurationError as exc:
-            raise CommandError(str(exc)) from exc
-
-        needs_manifest = options["check_vault"] or options["write_manifest"]
-        needs_identity = needs_manifest or options["recover_failed_initialization"]
-        if needs_identity and (not options["keyset_id"] or not options["vault_mount"]):
-            raise CommandError("Vault operations require --keyset-id and --vault-mount")
-        manifest = None
-        key = None
-        if needs_identity:
-            try:
-                manifest = build_keyset_manifest(options["keyset_id"], options["vault_mount"], configuration)
-                key = manifest_key(options["keyset_id"])
-            except CoverCryptConfigurationError as exc:
-                raise CommandError(str(exc)) from exc
-
-        if options["recover_failed_initialization"]:
-            if not options["confirm_no_authority"]:
-                raise CommandError(
-                    "Recovery requires --confirm-no-authority after verifying the plugin mount has no saved authority."
-                )
-            if options["keyset_id"] != "primary" or options["vault_mount"] != "abe_covercrypt":
-                raise CommandError("Failed-initialization recovery is limited to primary at abe_covercrypt.")
-            if (vault_service.get_secret(key) is not None or
-                    vault_service.get_secret("CPABE_PK_COVERCRYPT") is not None or
-                    vault_service.get_secret("PQC_PK_COVERCRYPT") is not None):
-                raise CommandError("CoverCrypt metadata or public keys exist in KV; refusing to clear its setup guard.")
-            if vault_service.get_secret("COVERCRYPT_MOUNT_CREATED") != "abe_covercrypt":
-                raise CommandError("The mount was not recorded as newly created; refusing failed-setup recovery.")
-            marker_key = "COVERCRYPT_KEYSET_INITIALIZING_primary"
-            marker_raw = vault_service.get_secret(marker_key)
-            try:
-                marker_data = json.loads(marker_raw) if isinstance(marker_raw, str) else marker_raw
-            except (TypeError, ValueError) as exc:
-                raise CommandError("The initialization guard is not valid JSON; refusing recovery.") from exc
-            if (not isinstance(marker_data, dict) or marker_data.get("status") != "initializing" or
-                    marker_data.get("config_fingerprint") != configuration.fingerprint):
-                raise CommandError("The initialization guard does not match this active configuration; refusing recovery.")
-            if not vault_service.put_secret(marker_key, None):
-                raise CommandError("Vault did not clear the failed CoverCrypt initialization guard.")
-            self.stdout.write(self.style.SUCCESS("Cleared the matching failed-initialization guard."))
-            return
-
-        if options["check_vault"]:
-            stored_manifest = vault_service.get_secret(key)
-            if stored_manifest is None:
-                raise CommandError(f"No CoverCrypt keyset manifest exists in Vault at key '{key}'")
-            try:
-                verify_keyset_manifest(stored_manifest, options["keyset_id"], options["vault_mount"], configuration)
-            except CoverCryptConfigurationError as exc:
-                raise CommandError(str(exc)) from exc
-
-        if options["write_manifest"]:
-            existing = vault_service.get_secret(key)
-            if existing is not None:
-                try:
-                    verify_keyset_manifest(existing, options["keyset_id"], options["vault_mount"], configuration)
-                except CoverCryptConfigurationError as exc:
-                    raise CommandError(
-                        "Refusing to overwrite an incompatible CoverCrypt keyset manifest: " + str(exc)
-                    ) from exc
-            if not vault_service.put_secret(key, json.dumps(manifest, sort_keys=True, separators=(",", ":"))):
-                raise CommandError("Vault did not accept the CoverCrypt keyset manifest")
-
-        response = {"configuration": configuration.as_dict()}
-        if manifest is not None:
-            response["keyset_manifest"] = manifest
-        self.stdout.write(json.dumps(response, indent=2))
+            reconcile = options['reconcile_vault'] or options['write_manifest']
+            operations = (options['check_vault'], reconcile, options['initialize_vault'], options['rotate_vault'])
+            if sum(operations) > 1:
+                raise CommandError('Choose one Vault operation.')
+            result = {'configuration': configuration.as_dict()}
+            if any(operations):
+                if not getattr(settings, 'USE_VAULT_ABE_PLUGIN', False):
+                    raise CommandError('Vault authority reconciliation requires Vault plugin mode.')
+                if options['keyset_id'] != 'primary':
+                    raise CommandError('Vault operations require --keyset-id primary.')
+                service = CPABEService.vault_metadata_client()
+                if options['rotate_vault']:
+                    mount = validate_vault_mount(options['vault_mount'])
+                    if not options['expected_fingerprint']:
+                        raise CommandError('Rotation requires --expected-fingerprint for the current authority.')
+                    result['keyset_manifest'] = service.rotate_covercrypt_authority(mount, options['expected_fingerprint'])
+                else:
+                    state = service._covercrypt_authority_state()
+                    initialized = state.get(COVERCRYPT_MANIFEST_KEY) is not None
+                    active_mount = service._covercrypt_record_mount(state) if initialized else COVERCRYPT_VAULT_MOUNT
+                    mount = validate_vault_mount(options['vault_mount'] or active_mount)
+                    if mount != active_mount:
+                        raise CommandError('The requested mount is not the active CoverCrypt mount.')
+                    headers = {'X-Vault-Token': vault_service.get_token}
+                    if reconcile or options['initialize_vault']:
+                        service._ensure_covercrypt_keyset(
+                            bool(getattr(settings, 'ENABLE_PQC_FEATURES', False)),
+                            headers, allow_setup=options['initialize_vault'] and not initialized,
+                        )
+                        state = service._covercrypt_authority_state()
+                    route = service._verify_covercrypt_record(state, headers)
+                    if route.mount != mount or route.configuration.fingerprint != configuration.fingerprint:
+                        raise CommandError('The active CoverCrypt mount or configuration differs from the requested schema.')
+                    result['keyset_manifest'] = json.loads(service._covercrypt_record(route)[COVERCRYPT_MANIFEST_KEY])
+            self.stdout.write(json.dumps(result, indent=2))
+        except CommandError:
+            raise
+        except Exception as exc:
+            raise CommandError('CoverCrypt public metadata could not be verified/reconciled; authority and guards were not reset.') from exc

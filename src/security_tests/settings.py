@@ -30,6 +30,7 @@ PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REST_FRAMEWORK = {'DEFAULT_AUTHENTICATION_CLASSES': [], 'DEFAULT_THROTTLE_CLASSES': []}
 MEDIA_ROOT = Path(_sandbox.name) / 'media'
+STORAGE_VENDOR = 'local_disk'
 MEDIA_URL = '/media/'
 FIELD_ENCRYPTION = False
 ENABLE_PQC_FEATURES = False

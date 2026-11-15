@@ -42,26 +42,44 @@ The native CoverCrypt KEM mode is `classic`, `post_quantum`, or `hybridized`. In
 
 The library's v2 envelope has a scheme indicator byte: `0` AC17, `1` TKN20, and `2` CoverCrypt. CoverCrypt uses the normal v2 scheme-tagged hybrid envelope, so the CPQA header parser should accept `scheme=covercrypt` for v2 and continue to reject unknown values. Legacy v1 has no scheme byte and remains AC17.
 
-The header identifies ciphertext format and ABE scheme; it does **not** record whether ML-DSA signing was enabled. The Vault `encrypt` response only returns `ciphertext`, so the caller must record signature mode from the exact key/configuration used for that encryption in the per-version metadata. For a version recorded as signed, decryption must provide the matching verification public key and require verification success. Never infer the signature mode from `CPABE_SCHEME`, the current `pqc` setting, or the ABE header.
+The header identifies ciphertext format and ABE scheme. Authority contract v1 reports signature mode in its encryption metadata. A signed version requires the matching verification public key during decryption. The original plugin returned only ciphertext.
 
 ## Upstream-only integration
 
 CPQA builds the original upstream source without local patches, source rewrites,
-custom endpoints or serialization extensions. Public keys use the Base64 contract
-above. Encrypt has no per-request `sign` field and returns ciphertext only;
-CPQA records application metadata from the requested scheme, validated envelope
-and known authority signing state. A signing-state mismatch is rejected before
-encryption instead of pretending a client flag changes library behavior.
+custom endpoints or serialization extensions. The table above is the original
+v6.0.0 contract. Upstream commit `a75c50e` (unreleased, `VERSION` still 6.0.0)
+adds **authority contract v1**, documented upstream in
+[`plugins/vault/AUTHORITY.md`](https://github.com/WanThinnn/Hybrid-PQ-CP-ABE-Library/blob/main/plugins/vault/AUTHORITY.md).
+CPQA consumes that published contract; it does not define one of its own.
 
-The upstream plugin has no read-only public authority recovery endpoint. An
-interrupted setup is blocked; missing KV metadata does not establish that the
-mount is empty. Do not repeat setup or clear guards without independent operator
-verification. Large authority/public-key support and safe recovery require work
-in the library project: [upstream requirements](covercrypt-upstream-requirements.md).
+| Upstream v1 feature | CPQA use (`services/cpabe_service.py`, `services/vault_abe_contract.py`) |
+| --- | --- |
+| `GET <mount>/authority` (read-only, `contract_version: 1`) | Verifies scheme, revision, public-key fingerprint, signing state and, for CoverCrypt, the parsed configuration plus `hybridized` mode. It also reconciles missing AC17/TKN20 public KV metadata and an interrupted CoverCrypt first setup without calling setup. A 404 never clears an initialization guard. |
+| `setup` with `create_only=true` | Used only for a first setup, after Vault's `?help=1` OpenAPI schema advertises `create_only` and `public_key_format`. An older plugin would ignore an unknown field and replace keys, so setup is refused when the help is missing. CoverCrypt requests `reference` transport; AC17/TKN20 request `base64`. |
+| `vault-authority-sha256:<hex>` public-key reference | Stored in KV for CoverCrypt and sent on encrypt. Its fingerprint is accepted only after the plugin contract was verified. |
+| `encrypt` `sign` field and `crypto_metadata` | CPQA sends an explicit `sign` boolean. New Vault versions store metadata **schema 2**: the upstream fields plus `contract_version`, `keyset_id` and `authority_revision`. These are checked against the requested scheme/signature, the ciphertext header and the authority read before encryption. |
 
-CPQA rejects public-key payloads above a conservative 512-KiB application KV
-budget before attempting to persist them. This is not a new library encoding or
-a claim that all smaller authority configurations fit Vault's storage limits.
+Reads of schema-2 versions call `verify_version_authority`: the live authority's
+fingerprint and revision must equal the recorded `keyset_id`/`authority_revision`
+before a cached user key is used. The user-key cache key also includes both values.
+CoverCrypt routes by fingerprint and revision through the active manifest and
+the retained-mount registry. Schema-1 CoverCrypt versions without an authority
+identity require recovery after rotation. Old ciphertext is left in place.
+
+The CoverCrypt manifest records `contract_version`, `authority_revision` and
+`public_key_format`. The `covercrypt_config` command provides `--check-vault` and
+`--reconcile-vault` (alias `--write-manifest`). Both require
+`--keyset-id primary` and resolve the active mount from Vault KV. The
+guard-clearing options `--recover-failed-initialization` and `--confirm-no-authority`
+are retired and fail.
+
+Authority growth (`add_dimension`) changes the fingerprint and revision.
+Use [separate mounts for rotation](covercrypt-configuration-lifecycle.md#rotate-while-retaining-historical-reads).
+A schema-2 version fails closed if its exact retained authority is unavailable.
+Base64 public keys above 512 KiB are rejected; large keys must use reference
+transport. Upgrading a deployed Vault requires the backup and procedure in
+upstream `AUTHORITY.md`; building images does not upgrade existing Vault data.
 
 ## Error behavior
 

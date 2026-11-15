@@ -63,6 +63,25 @@ class CryptoUpdateTests(unittest.TestCase):
         self.assertEqual(calls[0][-2:], ['pull', '--ignore-buildable'])
         self.assertEqual(calls[1][-1], 'build')
 
+    def test_clean_preserves_host_keys_when_vault_volume_removal_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            keys = Path(directory)
+            unseal = keys / 'vault_unseal_keys.json'
+            token = keys / 'vault_token.txt'
+            for file in (unseal, token):
+                file.touch()
+            command = ['docker', 'volume', 'rm', 'cloud-policy-quantum-access_vault_data']
+            output = io.StringIO()
+            with patch.object(start, 'load_env_file', return_value={'KEYS_DIR': str(keys)}), \
+                 patch('builtins.input', side_effect=['y', 'n', 'n', 'y', 'n', 'n']), \
+                 patch.object(start.subprocess, 'check_output', return_value=command[-1] + '\n'), \
+                 patch.object(start, 'run', side_effect=[None, subprocess.CalledProcessError(7, command)]), \
+                 contextlib.redirect_stdout(output):
+                self.assertEqual(start.main(['clean']), 7)
+            self.assertTrue(unseal.exists())
+            self.assertTrue(token.exists())
+            self.assertNotIn('[OK] Selected volumes removed.', output.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -44,15 +44,75 @@ Lệnh in setup JSON canonical và fingerprint. Nó không setup plugin và khô
 
 CPQA fingerprint JSON setup canonical cùng version các `AttributeDefinition` nguồn. Fingerprint đổi khi dimension được tạo hoặc version schema nguồn thay đổi.
 
-Khi triển khai provision, operator truyền rõ keyset ID và mount đã duyệt:
+Operator có thể kiểm tra keyset đã ghi hoặc khôi phục public metadata khớp authority:
 
 ```text
-python manage.py covercrypt_config --write-manifest --keyset-id <keyset-id> --vault-mount <mount>
-python manage.py covercrypt_config --check-vault --keyset-id <keyset-id> --vault-mount <mount>
+python manage.py covercrypt_config --check-vault --keyset-id primary --vault-mount abe_covercrypt
+python manage.py covercrypt_config --reconcile-vault --keyset-id primary --vault-mount abe_covercrypt
 ```
+
+Với môi trường CoverCrypt mới, `start.py initdata` khởi tạo authority sau khi
+seed dimensions. Nếu đã seed, chạy
+`python manage.py covercrypt_config --initialize-vault --keyset-id primary --vault-mount abe_covercrypt`
+trong web container. Raft có thể cần vài phút. Upload cần authority đã sẵn sàng.
+Nếu setup bị gián đoạn, dùng reconcile cho authority hiện có. Nếu không đọc
+được authority, guard vẫn được giữ lại.
 
 Manifest không secret được lưu dưới key `COVERCRYPT_KEYSET_MANIFEST_<keyset-id>` trong Vault KV path đã cấu hình. Nó liên kết authority với fingerprint, version definition nguồn và mount. Mismatch sẽ fail closed; không gọi `setup` hoặc ghi đè authority.
 
 Backup giữ Vault data path, mount, keyset ID, manifest và schema nguồn. Recovery khôi phục authority/manifest tương ứng rồi chạy `--check-vault`. Không export MSK vào Django hay backup metadata.
 
-Xem mọi thay đổi fingerprint là không tương thích cho đến khi được review. Mở rộng dimension theo hỗ trợ upstream thì dùng `add_dimension`, sau đó cập nhật manifest. Với thay đổi không tương thích, provision mount/keyset mới và giữ keyset cũ cho ciphertext lịch sử. Không gọi setup trên authority đã có vì upstream setup sẽ thay thế authority.
+## Rotation giữ khả năng đọc lịch sử
+
+Mount ban đầu là `abe_covercrypt/` và `VAULT_SECRET_PATH` mặc định là
+`secret/data/crypto_access`. Manifest primary chỉ định mount đang dùng.
+Trước khi đổi danh mục thuộc tính, chạy `--check-vault --keyset-id primary` và
+ghi lại fingerprint public key hiện hành. Sao lưu Vault Raft, registry trong KV
+và unseal material tương ứng. Bố trí thời gian tạm dừng ghi nếu đổi danh mục
+thuộc tính. Mã hóa mới bị chặn khi schema chưa khớp authority.
+
+1. Chọn mount chưa dùng, ví dụ `abe_covercrypt_20261115`. Chạy
+   `python manage.py covercrypt_config` với cấu hình dự kiến và lưu riêng đối
+   tượng `configuration.config` vào `covercrypt.json`.
+2. Dùng quyền operator Vault và plugin contract v1 để tạo mount riêng. Chọn
+   trạng thái ký phù hợp với file mới.
+
+   ```sh
+   vault secrets enable -path=abe_covercrypt_20261115 vault-plugin-abe
+   vault write abe_covercrypt_20261115/setup scheme=covercrypt mode=hybridized \
+     config_json=@covercrypt.json pqc=true create_only=true public_key_format=reference
+   ```
+
+3. Cấp quyền ứng dụng gọi `authority`, `encrypt`, `genkey` và `decrypt` trên
+   mount mới. Giữ quyền gọi `authority`, `genkey` và `decrypt` trên từng mount
+   lịch sử. Chạy lệnh bằng danh tính được phép ghi vào KV đã cấu hình.
+
+   ```sh
+   python manage.py covercrypt_config --rotate-vault --keyset-id primary \
+     --vault-mount abe_covercrypt_20261115 --expected-fingerprint OLD_FINGERPRINT
+   python manage.py covercrypt_config --check-vault --keyset-id primary
+   ```
+
+4. Xác minh upload/download file mới, download version lịch sử, và trường hợp
+   từ chối user thiếu thuộc tính. Giữ đúng authority và verifier mà mỗi
+   version đang tham chiếu.
+
+Khi chuyển mount, CPQA cập nhật bản ghi primary và lưu public metadata cũ vào
+`COVERCRYPT_AUTHORITY_HISTORY_v1` trong một lần ghi nguyên tử. Registry tra theo
+fingerprint và revision. CPQA dùng mount tương ứng để tạo user key và giải mã.
+Dùng mount riêng cho rotation. Chạy `setup` hoặc `add_dimension` tại chỗ sẽ đổi
+identity. Nếu mount bị mất, khôi phục từ bản sao Vault tương ứng. Sau rotation,
+version CoverCrypt thiếu identity cần operator recovery. User vẫn cần thuộc
+tính còn hiệu lực và hợp lệ trong dimensions lịch sử. Xem [hướng dẫn contract Vault](covercrypt-vault-contract.md).
+
+## Khôi phục một version file
+
+Chọn **Restore** trong lịch sử version hoặc gửi
+`POST /api/storage/files/<id>/restore_version/` với `{"version_number": 1}`.
+Owner hoặc admin cần quyền cập nhật tài liệu và phải vượt qua các bước kiểm
+tra quyền đọc và giải mã. Version nguồn phải cũ hơn, dùng cùng policy, scheme
+và backend với version hiện tại. Nếu version hiện tại có chữ ký thì nguồn cũng
+phải có chữ ký. Khi hai authority CoverCrypt khác nhau, tên dimensions phải
+trùng và các tập giá trị lịch sử phải là tập con của tập hiện tại. Sau khi
+giải mã và quét mã độc, CPQA ghi lại đúng bytes nguồn đã xác minh thành version
+mới với metadata mật mã và chữ ký của nguồn.

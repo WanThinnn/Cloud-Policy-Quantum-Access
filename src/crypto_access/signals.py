@@ -144,7 +144,7 @@ def handle_attribute_change(sender, instance, created, **kwargs):
     old_value = old_data.get('value')
     new_value = instance.value
     
-    if old_value != new_value:
+    if old_value != new_value or old_data['status'] != instance.status:
         logger.warning(
             f"[ATTR-CHANGE] User {instance.user.username}: "
             f"{instance.attribute.name} changed from '{old_value}' to '{new_value}'"

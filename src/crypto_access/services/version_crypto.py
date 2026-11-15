@@ -1,6 +1,7 @@
 """Typed per-version crypto metadata. Never infer history from current feature flags."""
 import copy
 import struct
+from .covercrypt_public_key import public_key_fingerprint, valid_fingerprint
 
 from rest_framework.exceptions import APIException
 
@@ -40,10 +41,19 @@ def inspect_header(data):
 
 
 def validate_metadata(value):
-    if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1 or
+    if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] not in (1, 2) or
             type(value.get('pqc_signed')) is not bool):
         raise CryptoMetadataError()
-    if set(value) != set(PLAINTEXT_METADATA):
+    fields = set(PLAINTEXT_METADATA)
+    if value['schema'] == 2:
+        fields |= {'keyset_id', 'authority_revision', 'contract_version'}
+        if (value.get('backend') != 'vault' or value.get('format') != 'hybrid-v2' or
+                type(value.get('contract_version')) is not int or value['contract_version'] != 1 or
+                not valid_fingerprint(value.get('keyset_id')) or
+                type(value.get('authority_revision')) is not int or
+                not 1 <= value['authority_revision'] <= (1 << 64) - 1):
+            raise CryptoMetadataError()
+    if set(value) != fields:
         raise CryptoMetadataError()
     if value.get('format') == 'plaintext':
         if any(value.get(key) != expected for key, expected in PLAINTEXT_METADATA.items()):
@@ -54,6 +64,23 @@ def validate_metadata(value):
     elif value['format'] == 'hybrid-v1' and value['scheme'] != 'ac17':
         raise CryptoMetadataError()
     return copy.deepcopy(value)
+
+
+def metadata_from_plugin(result, data, *, scheme, signed, public_key, revision):
+    """Map upstream encryption-time schema 1 to CPQA version metadata schema 2."""
+    if not isinstance(result, dict):
+        raise CryptoMetadataError()
+    value = result.get('crypto_metadata')
+    fields = set(PLAINTEXT_METADATA) | {'keyset_id', 'authority_revision'}
+    if not isinstance(value, dict) or set(value) != fields or type(value.get('schema')) is not int or value['schema'] != 1:
+        raise CryptoMetadataError('Vault plugin encryption metadata contract is required; upgrade the plugin.')
+    metadata = validate_metadata({**value, 'schema': 2, 'contract_version': 1})
+    header = inspect_header(data)
+    if (metadata['scheme'] != scheme or metadata['pqc_signed'] != signed or metadata['authority_revision'] != revision or
+            metadata['keyset_id'] != public_key_fingerprint(public_key) or
+            any(metadata[key] != header[key] for key in ('scheme', 'format'))):
+        raise CryptoMetadataError('Vault ciphertext metadata differs from the requested operation or authority.')
+    return metadata
 
 
 def metadata_for_read(version, data, *, backend):
@@ -73,6 +100,8 @@ def metadata_for_read(version, data, *, backend):
         # signature verification can automatically establish a trustworthy signed mode.
         value = {'schema': 1, **header, 'pqc_signed': True, 'backend': backend}
     value = validate_metadata(value)
+    if version is not None and (value['format'] == 'plaintext') == bool(version.cpabe_policy):
+        raise CryptoMetadataError()
     if value['format'] != 'plaintext':
         header = inspect_header(data)
         if any(value[key] != header[key] for key in ('scheme', 'format')) or value['backend'] != backend:

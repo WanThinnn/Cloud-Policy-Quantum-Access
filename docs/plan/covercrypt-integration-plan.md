@@ -1,6 +1,6 @@
 # Kế hoạch tích hợp CoverCrypt
 
-> **2026-11-08 — Ranh giới upstream:** CPQA không được patch/sửa thư viện hoặc tự thêm API/serialization khi build. Các patch authority/reference đã gỡ; thay đổi lớn-key/recovery cần xử lý ở dự án lib. Giai đoạn 6–9 vẫn chưa hoàn tất. Các đánh dấu trước đây không thay thế kiểm chứng với plugin nguyên bản. Xem [yêu cầu upstream](../vi/covercrypt-upstream-requirements.md).
+> **2026-11-15:** CPQA dùng authority contract v1 từ upstream `a75c50e`. Metadata schema 2 lưu fingerprint và revision. Rotation giữ mount lịch sử và restore version đã qua kiểm thử trên Vault Raft cô lập. Xem [quy trình operator](../vi/covercrypt-configuration-lifecycle.md).
 
 [English](../en/covercrypt-integration-plan.md) · [Build source mật mã](crypto-source-build.md)
 
@@ -96,52 +96,55 @@ Docker hiện build thư viện từ nhánh upstream có thể thay đổi. Gi�
 
 ### 6. Mở rộng metadata theo version và giữ ciphertext lịch sử
 
-- [ ] Định nghĩa metadata CoverCrypt gồm scheme, backend, ciphertext format/version, chế độ chữ ký và ID keyset/cấu hình không chứa secret cần thiết để đọc đúng.
-- [ ] Mở rộng `validate_metadata` và lưu metadata nhưng không diễn giải envelope CoverCrypt thành format `hybrid-v1`/`hybrid-v2` hiện tại của AC17/TKN20.
-- [ ] Thêm parser hoặc contract metadata tin cậy từ plugin để xác thực scheme/format thật của ciphertext. Từ chối metadata/ciphertext không khớp hoặc format lạ; không đoán theo `CPABE_SCHEME` hiện tại.
-- [ ] Đảm bảo version AC17/TKN20 cũ vẫn đọc được khi scheme hiện tại là CoverCrypt và ngược lại.
-- [ ] Rà luồng copy, rename, restore version, policy assignment và re-encryption để giữ metadata của ciphertext được copy và chỉ ghi metadata mới cho version vừa mã hóa.
-- [ ] Chỉ tạo migration nếu có thay đổi schema quan hệ cụ thể. JSON metadata đổi format thì xử lý bằng validation có version rõ ràng, không rewrite ciphertext hay backfill lịch sử chưa biết.
+- [x] Metadata Vault schema 2 lưu scheme, backend, format, chế độ ký, fingerprint public key và revision. Manifest Vault cung cấp cấu hình đã xác minh.
+- [x] `validate_metadata` phân biệt CoverCrypt bằng scheme tag 2 của envelope upstream `hybrid-v2`. `hybrid-v1` chỉ hợp lệ với AC17.
+- [x] Đối chiếu metadata từ plugin với header và authority. Từ chối scheme/format lạ, metadata mâu thuẫn và ciphertext CoverCrypt thiếu metadata tin cậy.
+- [x] Đọc version AC17/TKN20 khi scheme hiện tại là CoverCrypt và đọc CoverCrypt sau khi đổi sang AC17/TKN20, với authority tương ứng còn hoạt động.
+- [x] Copy giữ metadata của ciphertext được copy. Rename và restore từ thùng rác giữ mọi version. Policy assignment/re-encryption chỉ ghi metadata mới cho version mới.
+- [x] Restore version lịch sử thành version mới nếu quyền, policy, scheme, backend, cấu hình và chữ ký tương thích. Giữ nguyên bytes nguồn, metadata và chữ ký.
+- [x] Giữ JSON metadata có version, không cần migration quan hệ, không rewrite ciphertext hay backfill lịch sử chưa xác minh.
 
 **Tiêu chí hoàn tất:** mỗi version cũ luôn dùng đúng backend/scheme/format đã ghi; ciphertext lịch sử không rõ vẫn bị từ chối thay vì phân loại đoán.
 
 ### 7. Rà authorization, bypass, cache và lifecycle khóa
 
-- [ ] Định nghĩa hành vi CoverCrypt với owner/privileged user ở chế độ thường và `SUPER_ADMIN_REQUIRE_POLICY` strict.
-- [ ] Không giả mạo thuộc tính CoverCrypt bằng cách trích token từ policy string. Nếu giữ bypass non-strict hiện có, cần một đường satisfaction giới hạn, bảo toàn ngữ nghĩa và có test; nếu chưa làm được thì từ chối bypass CoverCrypt.
-- [ ] Đưa scheme, danh tính user, thuộc tính đã chuẩn hóa, backend và phiên bản key/config vào cache identity khi cần.
-- [ ] Invalidate user-key cache bị ảnh hưởng khi đổi thuộc tính, thu hồi khóa, rotation cấu hình/keyset CoverCrypt hoặc đổi backend.
-- [ ] Kiểm thử user bị từ chối vẫn không giải mã được dù còn cache key; strict policy không bị vượt qua qua owner/grant/cache.
-- [ ] Không ghi secret key hoặc plaintext vào log, error response, telemetry hay persistent Django settings.
+- [x] Xác định hành vi owner/privileged user trong chế độ thường và `SUPER_ADMIN_REQUIRE_POLICY` strict.
+- [x] Non-strict bypass dùng bộ giải policy giới hạn, giữ ngữ nghĩa biểu thức và được test. Strict dùng thuộc tính thật.
+- [x] Cache identity gồm scheme, user, biểu diễn thuộc tính theo thứ tự ổn định, backend, chế độ bypass/strict và keyset/config khi áp dụng.
+- [x] Thay đổi thuộc tính, thu hồi, backend hoặc identity cấu hình/keyset làm khóa cache cũ không còn được tra cứu. Entry cũ hết hạn theo TTL. Revocation này áp dụng cho cache của CPQA.
+- [x] Kiểm thử deny sau khi cache đã nóng và strict deny qua đường owner/cache. Kiểm tra grant trong bộ strict authorization.
+- [x] Giữ khóa user trong file tạm và cache mã hóa. Luồng mã hóa/giải mã CoverCrypt qua Vault không đưa khóa secret hoặc nội dung file vào settings hay log.
+- [x] Registry Vault KV định tuyến version theo fingerprint/revision đến mount lịch sử. Operator chuyển lượt ghi mới sang mount riêng bằng CAS.
 
 **Tiêu chí hoàn tất:** CoverCrypt không làm yếu các lớp authentication, ABAC, file-policy hay kiểm soát mật mã của ứng dụng.
 
 ### 8. Bổ sung regression và end-to-end coverage
 
-- [ ] Unit test parsing dimensions, attribute normalization, policy compilation, metadata validation và native mode chưa hỗ trợ.
-- [ ] Mở rộng plugin smoke test cho dimensions cấu hình, user key đúng/sai, request lỗi, config mismatch, thao tác ký/không ký và error response.
-- [ ] Thêm test CPQA upload/download cô lập cho user được phép/bị từ chối, xen kẽ version AC17/TKN20/CoverCrypt, và đọc version cũ sau khi đổi scheme hiện tại.
-- [ ] Test policy assignment/re-encryption, copy/restore, signature verification, cache invalidation, key revocation và privileged access strict/non-strict.
-- [ ] Xác nhận setup CoverCrypt lỗi hoặc Vault outage thì fail closed, không lưu plaintext như thể mã hóa thành công.
-- [ ] Chạy security test và Docker crypto/plugin smoke test phù hợp trong môi trường cô lập; ghi rõ test đã chạy và dịch vụ ngoài nào chưa có.
+- [x] Unit test dimensions, mapper thuộc tính, compiler và metadata validation. Native ABI có adapter riêng, ngoài phạm vi nghiệm thu của bộ Vault.
+- [x] Plugin smoke test kiểm tra cấu hình, user key đúng/sai, request lỗi, reference mismatch, ký/không ký và error response. CPQA regression kiểm tra config mismatch.
+- [x] Test CPQA/Vault cô lập kiểm tra allow/deny, xen kẽ AC17/TKN20/CoverCrypt và đọc version sau khi đổi scheme mặc định.
+- [x] Test policy assignment/re-encryption, copy, rename, restore từ thùng rác và từ lịch sử version, xác minh chữ ký, cache revocation và strict/non-strict.
+- [x] Setup lỗi và Vault outage fail closed trước khi ghi blob hoặc tạo version.
+- [x] Chạy 166 security regression, 7 test CPQA với Vault Raft và smoke plugin cho ba scheme. Dùng DB/cache/blob cô lập và mô phỏng ClamAV trong bài tích hợp CPQA. Xem `FACTS.md`.
 
 **Tiêu chí hoàn tất:** test chứng minh cả allow và deny, đồng thời bảo vệ scheme và ciphertext lịch sử hiện có.
 
 ### 9. Viết tài liệu triển khai và phát hành
 
-- [ ] Mô tả dimensions CoverCrypt, cú pháp policy, cấu hình deployment, Vault mount/KV path, khởi tạo, backup/recovery và rotation trong tài liệu cặp `docs/en/` và `docs/vi/`.
-- [ ] Chỉ cập nhật `.env.example`, operator help và lựa chọn scheme trong API/UI khi cấu hình đã hoàn tất; không đưa secret/private key vào tài liệu.
-- [ ] Nêu rõ hỗ trợ ban đầu chỉ qua Vault plugin trừ khi native ABI được triển khai và xác minh riêng.
-- [ ] Sau khi code hoàn thành, cập nhật project facts và release notes với nguồn triển khai và giới hạn đã xác minh.
-- [ ] Xác nhận Docker/CI build ghi commit/version upstream đã resolve vào manifest sinh tự động và kiểm thử contract plugin mà không hardcode commit.
+- [x] Tài liệu EN/VI mô tả dimensions, policy, cấu hình, Vault mount/KV, khởi tạo và backup/recovery, cùng giới hạn rotation.
+- [x] Operator help có lệnh khởi tạo, kiểm tra, reconcile và rotation. Scheme do deployment chọn. Mặc định `.env.example` và quyền cấu hình runtime giữ nguyên.
+- [x] Phạm vi kiểm chứng phát hành là Vault plugin. Native CoverCrypt cần nghiệm thu riêng.
+- [x] Cập nhật `FACTS.md` và `release_note/unreleased.md` với nguồn và giới hạn kiểm chứng.
+- [x] CI resolve một commit upstream cho smoke test và hai image. Source manifest ghi commit/version đã build. Smoke đã chạy local, workflow phát hành sẽ chạy khi có tag.
 
 **Tiêu chí hoàn tất:** operator có thể deploy/rotate CoverCrypt mà không nhầm với AC17/TKN20 hoặc chữ ký ML-DSA; nội dung release khớp hành vi đã kiểm thử.
 
 ## Định nghĩa hoàn thành
 
-- [ ] File CoverCrypt mới upload/download thành công qua Vault với dimensions đã validate và policy translation.
-- [ ] User có quyền phù hợp giải mã được; user không có quyền bị từ chối.
-- [ ] Metadata theo version chọn đúng backend/scheme/format qua các lần đổi scheme, copy và đọc lịch sử.
-- [ ] Mount, key và ciphertext AC17/TKN20 hiện có tiếp tục đọc được.
-- [ ] Strict authorization, cache invalidation, signature verification và xử lý lỗi có regression coverage.
-- [ ] Tài liệu, cấu hình operator, source manifest và release notes khớp phạm vi đã triển khai/kiểm thử.
+- [x] File CoverCrypt mới upload/download thành công qua Vault với dimensions đã validate và policy translation.
+- [x] User có thuộc tính phù hợp giải mã được, user sai thuộc tính bị từ chối trong bài tích hợp.
+- [x] Metadata version giữ backend/scheme/format qua đổi scheme, copy và đọc lịch sử khi authority đã ghi còn khả dụng.
+- [x] AC17/TKN20 qua signed/unsigned smoke và đọc version lịch sử trong môi trường cô lập. Database dev hiện tại không có mẫu AC17/TKN20 cũ để đối chiếu trực tiếp.
+- [x] Strict authorization, cache invalidation, signature verification và xử lý lỗi có regression coverage.
+- [x] Tài liệu, cấu hình operator, source manifest và release notes khớp phạm vi đã kiểm thử.
+- [x] Rotation chuyển lượt ghi mới, giữ khả năng đọc ciphertext đã ký cũ và từ chối identity sai. Restore tương thích giữ bytes và metadata gốc, từ chối policy khác và rollback khi ghi DB lỗi.

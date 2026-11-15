@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import APIException, PermissionDenied
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied
 from crypto_access.permissions import IsSuperAdmin
 from django.http import HttpResponse
 from django.utils import timezone
@@ -32,16 +32,17 @@ from ..serializers import (
 from ..serializers.storage import (
     FileAccessPolicySerializer,
     AssignPolicyToFileSerializer,
-    PolicyListForAssignmentSerializer
+    PolicyListForAssignmentSerializer,
+    RestoreFileVersionSerializer,
 )
 from ..serializers.policy import AccessPolicySerializer
 from ..services.storage.factory import get_storage_service
-from ..services.cpabe_service import cpabe_service
+from ..services.cpabe_service import CPABEAccessDenied, cpabe_service
 from ..services.casbin_service import casbin_service
 from ..services.tkn20_policy import bypass_attributes
-from ..services.document_access import can_bypass_document_policy, requires_document_policy
+from ..services.document_access import can_bypass_document_policy, is_document_administrator, requires_document_policy
 from ..services.version_crypto import (
-    CryptoMetadataError, PLAINTEXT_METADATA, metadata_for_read, persist_verified_metadata,
+    CryptoMetadataError, PLAINTEXT_METADATA, metadata_for_read, persist_verified_metadata, validate_metadata,
 )
 from ..throttles import CPABEDecryptThrottle, CPABEEncryptThrottle
 import tempfile
@@ -157,6 +158,13 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             persist_verified_metadata(file_version, crypto_metadata)
             return file_data
         abe_scheme = crypto_metadata['scheme']
+        route = None
+        if crypto_metadata['schema'] == 2 or (backend == 'vault' and abe_scheme == 'covercrypt'):
+            route = cpabe_service.verify_version_authority(crypto_metadata)
+        crypto_options = {'route': route} if route is not None else {}
+
+        from ..models import KeyRevocation
+        revocation_id = KeyRevocation.user_cache_generation(user.id)
             
         user_attrs = casbin_service.get_user_attributes(user)
         
@@ -168,7 +176,9 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         elif privileged_bypass and abe_scheme == 'covercrypt':
             from ..services.covercrypt_policy import bypass_attributes as covercrypt_bypass_attributes
             try:
-                user_attrs = covercrypt_bypass_attributes(user_attrs, policies_to_parse)
+                user_attrs = covercrypt_bypass_attributes(
+                    user_attrs, policies_to_parse, configuration=route.configuration if route else None,
+                )
             except ValueError as exc:
                 raise PermissionDenied('CoverCrypt policy cannot be satisfied by a valid bypass key.') from exc
         elif privileged_bypass:
@@ -202,8 +212,12 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         if abe_scheme == 'covercrypt':
             # User keys are authority/configuration specific; do not reuse a cache
             # entry after an operator changes CoverCrypt dimensions or keyset.
-            cache_key += f'_authority_{cpabe_service.covercrypt_cache_identity()}'
+            cache_key += f'_authority_{cpabe_service.covercrypt_cache_identity(**crypto_options)}'
         cache_key += f'_meta_v1_{backend}'
+        if revocation_id or crypto_metadata['schema'] == 2:
+            identity = (f"{cache_key}:{revocation_id}:{crypto_metadata.get('keyset_id', '')}:"
+                        f"{crypto_metadata.get('authority_revision', '')}")
+            cache_key = f'cpabe_key_{abe_scheme}_scoped_{user.id}_{hashlib.sha256(identity.encode()).hexdigest()}'
         encrypted_cached_key = cache.get(cache_key)
         
         cached_key_data = None
@@ -227,7 +241,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                     key_name = f_key.name
                 
                 try:
-                    cpabe_service.generate_user_key(user_attrs, key_name, scheme=abe_scheme)
+                    cpabe_service.generate_user_key(user_attrs, key_name, scheme=abe_scheme, **crypto_options)
                     # Read the generated key immediately and delete the file
                     with open(key_name, 'rb') as f:
                         cached_key_data = f.read()
@@ -244,9 +258,13 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 # Decrypt passing the raw bytes directly (No TempFile)
                 from django.conf import settings
                 if crypto_metadata['pqc_signed']:
-                    decrypted_data = cpabe_service.decrypt_buffer_and_verify(cached_key_data, file_data, scheme=abe_scheme)
+                    decrypted_data = cpabe_service.decrypt_buffer_and_verify(
+                        cached_key_data, file_data, scheme=abe_scheme, **crypto_options,
+                    )
                 else:
-                    decrypted_data = cpabe_service.decrypt_buffer(cached_key_data, file_data, scheme=abe_scheme)
+                    decrypted_data = cpabe_service.decrypt_buffer(
+                        cached_key_data, file_data, scheme=abe_scheme, **crypto_options,
+                    )
                 extra = {"user.name": user.username, "user.id": user.id} if user else {}
                 logger.info(f"CP-ABE Decryption successful for file: {file_path}", extra=extra)
                 # We DO NOT cache decrypted_data for security reasons.
@@ -254,6 +272,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 if legacy_metadata:
                     persist_verified_metadata(file_version, crypto_metadata)
                 return decrypted_data
+            except CPABEAccessDenied:
+                raise
             except Exception as e:
                 error_msg = str(e)
                 extra = {"user.name": user.username, "user.id": user.id} if user else {}
@@ -262,8 +282,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                     raise CryptoMetadataError('Historical crypto metadata could not be verified; recovery is required.')
                 # Otherwise (e.g. -4 Crypto failed), it is a real decryption failure
                 raise Exception("You don't have permission to see this file!")
-        except Exception as e:
-            raise e
+        except CPABEAccessDenied as exc:
+            raise PermissionDenied(str(exc)) from exc
     
     def get_queryset(self):
         """Filter files by user, bucket, and ABAC policies"""
@@ -753,20 +773,134 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 )
                 logger.info(f"Auto-created v1 FileVersion for legacy file: {uploaded_file.file_name} (id={uploaded_file.id})")
             
-            versions = uploaded_file.versions.all().order_by('-version_number')
+            versions = list(uploaded_file.versions.select_related('uploaded_by').order_by('-version_number'))
+            can_restore = (
+                (uploaded_file.uploaded_by_id == request.user.pk or is_document_administrator(request.user))
+                and casbin_service.check_access(request.user, 'document', 'update')
+            )
             result = []
+            latest = versions[0] if versions else None
             for v in versions:
+                try:
+                    restorable = can_restore and self._compatible_restore_metadata(v, latest) is not None
+                except CryptoMetadataError:
+                    restorable = False
                 result.append({
                     'version_number': v.version_number,
                     'file_size': v.file_size,
                     'cpabe_policy': v.cpabe_policy,
                     'crypto_metadata': v.crypto_metadata,
                     'uploaded_by': v.uploaded_by.username if v.uploaded_by else 'Unknown',
-                    'created_at': v.created_at
+                    'created_at': v.created_at,
+                    'can_restore': restorable,
                 })
             return Response({'versions': result})
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @staticmethod
+    def _compatible_restore_metadata(source, latest):
+        if source.pk == latest.pk or (source.cpabe_policy or '') != (latest.cpabe_policy or ''):
+            return None
+        metadata = validate_metadata(source.crypto_metadata)
+        current = validate_metadata(latest.crypto_metadata)
+        if (metadata['scheme'] != current['scheme'] or metadata['backend'] != current['backend'] or
+                current['pqc_signed'] and not metadata['pqc_signed']):
+            return None
+        return metadata
+
+    @action(detail=True, methods=['post'], throttle_classes=[CPABEDecryptThrottle])
+    def restore_version(self, request, pk=None):
+        """Publish verified historical bytes as a new version under the same policy."""
+        from ..services.clamav_service import clamav_service
+
+        serializer = RestoreFileVersionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        file_id = self.get_object().pk
+        version_number = serializer.validated_data['version_number']
+        storage = get_storage_service()
+        destination = None
+        try:
+            with transaction.atomic():
+                file = UploadedFile.objects.select_for_update().filter(pk=file_id, is_deleted=False).first()
+                if file is None:
+                    raise NotFound()
+                bucket = file.bucket.name
+                owner = file.uploaded_by_id == request.user.pk
+                if not (owner or is_document_administrator(request.user)):
+                    raise PermissionDenied('Only the owner or an administrator can restore a version.')
+                if not casbin_service.check_access(request.user, 'document', 'update'):
+                    raise PermissionDenied('You do not have permission to update this document.')
+                self._require_document_read(request.user, bucket, file.file_path, 'update')
+                self._require_document_read(request.user, bucket, file.file_path, 'download')
+                if (file.metadata or {}).get('clamav_scan') == 'infected':
+                    raise PermissionDenied('This document is blocked by malware scanning.')
+                latest = file.get_latest_version()
+                source = file.versions.filter(version_number=version_number).first()
+                if source is None:
+                    raise NotFound('The selected version does not exist.')
+                source_crypto = self._compatible_restore_metadata(source, latest)
+                if source_crypto is None:
+                    return Response({'error': 'Restore requires an older version with the same policy, scheme and backend, and preserves signature verification.'},
+                                    status=status.HTTP_409_CONFLICT)
+                current_crypto = validate_metadata(latest.crypto_metadata)
+                if source_crypto['scheme'] == 'covercrypt' and source_crypto['backend'] == 'vault' and (
+                    source_crypto.get('keyset_id'), source_crypto.get('authority_revision')
+                ) != (current_crypto.get('keyset_id'), current_crypto.get('authority_revision')):
+                    source_route = cpabe_service.verify_version_authority(source_crypto)
+                    current_route = cpabe_service.verify_version_authority(current_crypto)
+                    source_dimensions = {d['name']: set(d['attributes']) for d in source_route.configuration.dimensions}
+                    current_dimensions = {d['name']: set(d['attributes']) for d in current_route.configuration.dimensions}
+                    if source_dimensions.keys() != current_dimensions.keys() or any(
+                        not values <= current_dimensions[name] for name, values in source_dimensions.items()
+                    ):
+                        return Response({'error': 'The historical CoverCrypt configuration is incompatible with the current version.'},
+                                        status=status.HTTP_409_CONFLICT)
+                data = storage.download_file(bucket, source.physical_path, user=request.user)
+                plaintext = self._decrypt_file_if_needed(
+                    data, bucket, file.file_path, request.user, is_owner=owner,
+                    access_action='download', file_version=source,
+                )
+                safe, _ = clamav_service.scan_file_buffer(plaintext)
+                if not safe:
+                    raise PermissionDenied('The selected version did not pass malware scanning.')
+                del plaintext
+
+                folder = file.file_path.rpartition('/')[0]
+                filename = f'{uuid.uuid4().hex}_v{latest.version_number + 1}'
+                destination = f'{folder}/{filename}' if folder else filename
+                storage.upload_file(
+                    bucket_name=bucket, file_path=destination, file_data=data,
+                    content_type=file.mime_type or 'application/octet-stream', upsert=False, user=request.user,
+                )
+                restored = FileVersion.objects.create(
+                    file=file, version_number=latest.version_number + 1, physical_path=destination,
+                    file_size=source.file_size, cpabe_policy=source.cpabe_policy, crypto_metadata=source_crypto,
+                    uploaded_by=request.user, user_signature=source.user_signature,
+                    signer_public_key=source.signer_public_key, trusted_timestamp=source.trusted_timestamp,
+                    tsa_signature=source.tsa_signature,
+                )
+                file.file_size = source.file_size
+                file.abe_scheme = source_crypto['scheme'] or 'ac17'
+                file.metadata = {**(file.metadata or {}), 'file_size_bytes': source.file_size, 'clamav_scan': 'clean'}
+                file.signed_url = None
+                file.signed_url_expires_at = None
+                if file.bucket.bucket_type == 'public':
+                    file.public_url = storage.get_public_url(bucket, destination)
+                file.save(update_fields=['file_size', 'abe_scheme', 'metadata', 'signed_url',
+                                         'signed_url_expires_at', 'public_url', 'updated_at'])
+        except Exception as exc:
+            if destination is not None:
+                try:
+                    storage.delete_file(bucket, [destination], user=request.user)
+                except Exception:
+                    logger.error('Could not remove a failed restore object for file %s.', file_id)
+            if isinstance(exc, APIException):
+                raise
+            logger.error('File version restore failed for file %s (%s).', file_id, type(exc).__name__)
+            return Response({'error': 'Version restore failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'version_number': restored.version_number, 'restored_from': version_number},
+                        status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=['post'])
     def create_signed_url(self, request, pk=None):

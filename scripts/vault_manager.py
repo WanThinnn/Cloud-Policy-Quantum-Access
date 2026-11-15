@@ -210,11 +210,22 @@ def register_abe_plugin(client):
         if covercrypt_mount_created:
             secret_path = VAULT_SECRET_PATH.replace('secret/data/', '').strip('/')
             try:
-                current = client.secrets.kv.v2.read_secret_version(path=secret_path)['data']['data']
+                record = client.secrets.kv.v2.read_secret_version(
+                    path=secret_path, raise_on_deleted_version=False,
+                )['data']
+                current, version = record['data'], record['metadata']['version']
             except hvac.exceptions.InvalidPath:
-                current = {}
+                current, version = {}, 0
+            if not isinstance(current, dict):
+                raise RuntimeError("CoverCrypt cannot record a first-setup guard over unavailable Vault KV metadata.")
+            if any(current.get(key) is not None for key in (
+                'COVERCRYPT_KEYSET_MANIFEST_primary', 'COVERCRYPT_AUTHORITY_HISTORY_v1',
+                'COVERCRYPT_KEYSET_INITIALIZING_primary',
+            )):
+                print("CoverCrypt keyset metadata already exists. No new first-setup guard was recorded.")
+                return
             current['COVERCRYPT_MOUNT_CREATED'] = 'abe_covercrypt'
-            client.secrets.kv.v2.create_or_update_secret(path=secret_path, secret=current)
+            client.secrets.kv.v2.create_or_update_secret(path=secret_path, secret=current, cas=version)
             print("Recorded the new CoverCrypt mount for guarded first-time setup.")
             
     except Exception as e:

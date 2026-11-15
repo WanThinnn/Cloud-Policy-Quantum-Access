@@ -12,8 +12,8 @@ from .covercrypt_config import build_covercrypt_configuration
 _TOKEN = re.compile(r'[A-Za-z][A-Za-z0-9_.-]*::[A-Za-z][A-Za-z0-9_.-]*|&&|\|\||and\b|or\b|[()]')
 
 
-def bypass_attributes(user_attributes, policies):
-    configuration = build_covercrypt_configuration()
+def bypass_attributes(user_attributes, policies, *, configuration=None):
+    configuration = configuration or build_covercrypt_configuration()
     dimensions = {d['name']: d['attributes'] for d in configuration.dimensions}
     if not policies or len(policies) > 32 or any(not isinstance(p, str) for p in policies):
         raise ValueError('Missing or invalid CoverCrypt bypass policy.')

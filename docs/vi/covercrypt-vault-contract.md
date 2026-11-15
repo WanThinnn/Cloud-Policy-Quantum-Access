@@ -42,25 +42,33 @@ KEM mode CoverCrypt là `classic`, `post_quantum`, hoặc `hybridized`. Trong im
 
 Envelope v2 của thư viện có byte scheme indicator: `0` AC17, `1` TKN20, `2` CoverCrypt. CoverCrypt dùng envelope hybrid v2 có tag scheme; parser header CPQA cần nhận `scheme=covercrypt` trong v2 và tiếp tục từ chối giá trị lạ. V1 cũ không có scheme byte và tiếp tục là AC17.
 
-Header nhận diện format và ABE scheme; **không** ghi việc có bật ký ML-DSA hay không. Response Vault `encrypt` chỉ trả `ciphertext`, nên caller phải ghi signature mode theo chính key/config dùng cho encryption trong metadata từng version. Version đã ghi signed phải gửi đúng verification public key và yêu cầu verify thành công khi decrypt. Không đoán signature mode từ `CPABE_SCHEME`, setting `pqc` hiện tại hay ABE header.
+Header nhận diện format và ABE scheme. Authority contract v1 trả chế độ ký trong metadata mã hóa. Version có chữ ký cần đúng verification public key khi giải mã. Plugin ban đầu chỉ trả ciphertext.
 
 ## Tích hợp đúng contract upstream
 
-CPQA build source upstream gốc, không áp patch, sửa source, thêm endpoint hay đổi
-serialization. Public key dùng Base64 theo bảng contract phía trên. Encrypt
-không có cờ `sign` theo request và chỉ trả ciphertext; metadata ứng dụng được ghi
-từ scheme yêu cầu, envelope đã kiểm tra và trạng thái ký authority đã biết.
-Không khớp trạng thái ký thì từ chối trước mã hóa, không giả định cờ phía app có
-thể đổi hành vi thư viện.
+Các bảng phía trên mô tả contract v6.0.0 ban đầu. Commit upstream `a75c50e`
+bổ sung authority contract v1. CPQA build source upstream nguyên bản và sử dụng
+API được mô tả trong [AUTHORITY.md](https://github.com/WanThinnn/Hybrid-PQ-CP-ABE-Library/blob/a75c50eee4cb00bebb95452a311a36ed292b6ce5/plugins/vault/AUTHORITY.md).
 
-Plugin gốc chưa có endpoint chỉ đọc để phục hồi public metadata. Setup bị gián
-đoạn phải dừng; thiếu metadata KV không chứng minh mount trống. Không lặp setup
-hoặc xóa guard nếu chưa có kiểm chứng độc lập của operator. Hỗ trợ authority/key
-lớn và recovery phải cập nhật ở dự án lib: [yêu cầu upstream](covercrypt-upstream-requirements.md).
+- `GET <mount>/authority` đọc public metadata để đối chiếu fingerprint, revision,
+  trạng thái ký và cấu hình CoverCrypt. CPQA giữ guard khi authority không đọc được.
+- Setup lần đầu dùng `create_only=true` sau khi kiểm tra schema OpenAPI do Vault
+  cung cấp qua `?help=1`. CoverCrypt yêu cầu reference 87 ký tự. AC17/TKN20 yêu cầu Base64.
+- Encrypt gửi `sign` rõ ràng. CPQA kiểm tra metadata trả về với ciphertext,
+  scheme và authority. Metadata schema 2 lưu fingerprint và revision theo version.
+- Trước khi dùng khóa cache cho schema 2, CPQA xác minh identity và tra đúng
+  mount theo fingerprint/revision trong manifest primary hoặc registry lịch sử.
+  Sau rotation, CoverCrypt schema 1 thiếu identity cần operator recovery.
 
-CPQA từ chối public key vượt ngân sách KV ứng dụng bảo thủ 512 KiB trước khi ghi.
-Đây không phải encoding mới của lib, cũng không phải cam kết mọi cấu hình nhỏ
-hơn đều vừa giới hạn storage của Vault.
+Operator dùng `python manage.py covercrypt_config --check-vault --keyset-id primary`
+để kiểm tra. Dùng `--reconcile-vault` với cùng tham số để ghi lại public metadata
+đã xác minh. Cả hai thao tác đọc authority qua API chỉ đọc. Các cờ xóa guard cũ
+`--recover-failed-initialization` và `--confirm-no-authority` đã ngừng hỗ trợ.
+
+Ghi KV giới hạn public key Base64 ở 512 KiB. Schema lớn dùng reference.
+Chạy `setup` hoặc `add_dimension` tại chỗ làm đổi identity. Xem
+[quy trình rotation bằng mount riêng](covercrypt-configuration-lifecycle.md#rotation-giữ-khả-năng-đọc-lịch-sử).
+Quy trình backup, nâng cấp và rollback Vault nằm trong tài liệu upstream ở trên.
 
 ## Cách trả lỗi
 

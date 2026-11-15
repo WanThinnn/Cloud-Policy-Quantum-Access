@@ -33,6 +33,7 @@ class CoverCryptBypassTests(SimpleTestCase):
         self.strict = self.setting.start()
         self.addCleanup(self.setting.stop)
         for target, options in (
+            ('crypto_access.models.KeyRevocation.user_cache_generation', {'return_value': 0}),
             ('crypto_access.services.covercrypt_config.build_covercrypt_configuration', {'return_value': CONFIG}),
             ('crypto_access.services.covercrypt_policy.build_covercrypt_configuration', {'return_value': CONFIG}),
             ('crypto_access.views.storage.cpabe_service', {'new': self.crypto}),
@@ -71,8 +72,7 @@ class CoverCryptBypassTests(SimpleTestCase):
         self.assertEqual(self.generated[0]['employment_status'], 'active')
 
     def test_regular_user_cannot_receive_policy_satisfying_attributes(self):
-        from crypto_access.services.cpabe_service import CPABEError
-        with self.assertRaises(CPABEError):
+        with self.assertRaises(PermissionDenied):
             self.decrypt(admin=False)
         self.assertEqual(self.generated, [{'user_type': 'super_admin'}])
 
@@ -85,10 +85,9 @@ class CoverCryptBypassTests(SimpleTestCase):
         self.crypto.decrypt_buffer.assert_not_called()
 
     def test_strict_allowed_still_requires_real_attributes(self):
-        from crypto_access.services.cpabe_service import CPABEError
         self.strict.return_value = True
         with patch.object(views.casbin_service, 'check_file_access_with_fallback', return_value=(True, 'allow')):
-            with self.assertRaises(CPABEError):
+            with self.assertRaises(PermissionDenied):
                 self.decrypt(owner=True)
         self.assertEqual(self.generated, [{'user_type': 'super_admin'}])
 

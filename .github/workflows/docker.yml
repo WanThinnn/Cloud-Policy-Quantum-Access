@@ -33,12 +33,25 @@ jobs:
           username: wanthinnn
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Verify Vault plugin contract
+        id: crypto_source
+        run: |
+          repository=https://github.com/WanThinnn/Hybrid-PQ-CP-ABE-Library.git
+          commit=$(git ls-remote "$repository" HEAD | cut -f1)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          source="$repository#$commit"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          docker build --build-arg "CRYPTO_REPOSITORY=$source" --target vault -f docker/Dockerfile -t cpqa-vault-contract-ci .
+          python3 tests/smoke_crypto_image.py --image cpqa-vault-contract-ci
+
       - name: Build & Push Django App to Docker Hub
         uses: docker/build-push-action@v4
         with:
           context: .
           file: ./docker/Dockerfile
           target: web
+          build-args: |
+            CRYPTO_REPOSITORY=${{ steps.crypto_source.outputs.source }}
           push: true
           platforms: linux/amd64
           tags: |
@@ -53,6 +66,8 @@ jobs:
           context: .
           file: ./docker/Dockerfile
           target: vault
+          build-args: |
+            CRYPTO_REPOSITORY=${{ steps.crypto_source.outputs.source }}
           push: true
           platforms: linux/amd64
           tags: |

@@ -565,6 +565,11 @@ class KeyRevocation(BaseModel):
             key_id=key_id,
             status__in=['revoked', 'reissued']
         ).exists()
+
+    @classmethod
+    def user_cache_generation(cls, user_id):
+        """A committed revocation changes all cached key identities for this user."""
+        return cls.objects.filter(user_id=user_id).order_by('-pk').values_list('pk', flat=True).first() or 0
     
     @classmethod
     def get_user_revocations(cls, user, status=None):

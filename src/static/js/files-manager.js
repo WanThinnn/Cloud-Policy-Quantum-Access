@@ -249,6 +249,9 @@
                     downloadFileVersion(fp, vn);
                     break;
                 }
+                case 'restore-version':
+                    restoreFileVersion(btn);
+                    break;
                 // Preview modal actions
                 case 'close-preview': closePreview(); break;
                 case 'toggle-preview-metadata': {
@@ -2316,6 +2319,7 @@
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                             Download
                         </button>
+                        ${v.can_restore ? `<button type="button" data-action="restore-version" data-file-id="${fileId}" data-version="${v.version_number}" class="px-3 py-1.5 text-sm text-indigo-700 border border-indigo-100 rounded hover:bg-indigo-50 disabled:opacity-50">Restore</button>` : ''}
                     </div>
                 </div>`;
             });
@@ -2329,6 +2333,28 @@
     function closeVersionHistoryModal() {
         document.getElementById('version-history-modal').classList.add('hidden');
         currentVersionFile = null;
+    }
+
+    async function restoreFileVersion(button) {
+        const version = Number(button.dataset.version);
+        const filePath = currentVersionFile;
+        if (!confirm(`Restore version ${version} as a new version?`)) return;
+        button.disabled = true;
+        try {
+            const response = await fetch(`${API_BASE}files/${button.dataset.fileId}/restore_version/`, {
+                method: 'POST',
+                headers: {...headers, 'Content-Type': 'application/json'},
+                body: JSON.stringify({version_number: version})
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || result.detail || 'Restore failed');
+            showAlert(`Restored as version ${result.version_number}.`, 'success');
+            if (currentVersionFile === filePath) await openVersionHistoryModal(filePath);
+        } catch (error) {
+            showAlert(error.message, 'error');
+        } finally {
+            button.disabled = false;
+        }
     }
 
     async function downloadFileVersion(filePath, versionNumber) {

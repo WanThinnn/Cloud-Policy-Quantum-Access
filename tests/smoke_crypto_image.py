@@ -21,8 +21,10 @@ def main():
     manifest = subprocess.check_output([
         'docker', 'run', '--rm', '--entrypoint', 'cat', image, '/opt/cpqa/crypto/source.env'
     ], text=True)
-    expected_version = dict(line.split('=', 1) for line in manifest.splitlines()
-                            if line and not line.startswith('#'))['CRYPTO_VERSION']
+    source = dict(line.split('=', 1) for line in manifest.splitlines() if line and not line.startswith('#'))
+    expected_version = source['CRYPTO_VERSION']
+    assert len(source['CRYPTO_COMMIT']) == 40 and int(source['CRYPTO_COMMIT'], 16)
+    assert source['CRYPTO_CPQA_PATCHES'] == 'none'
     name = 'cpqa-crypto-smoke-' + uuid.uuid4().hex[:12]
     token = 'disposable-test-only'
     # Simulate executable artifacts left by an older image without any host volume.
@@ -87,20 +89,42 @@ def main():
                     def call(path, data):
                         return api(mount + '/' + path, data)['data']
 
-                    setup_request = {'scheme': scheme, 'pqc': signed}
+                    def reject(path, data):
+                        try:
+                            call(path, data)
+                        except urllib.error.HTTPError as error:
+                            assert error.code == 400, error.code
+                            assert json.load(error)['errors']
+                        else:
+                            raise AssertionError(f'Invalid {path} request was accepted')
+
+                    setup_request = {'scheme': scheme, 'pqc': signed, 'create_only': True}
                     if scheme == 'covercrypt':
+                        reject('setup', {**setup_request, 'config_json': '{"dimensions":[]}'})
                         setup_request['config_json'] = json.dumps({'dimensions': [
                             {'name': 'Department', 'attributes': ['IT', 'HR']},
                             {'name': 'Level', 'attributes': ['USER', 'ADMIN']},
                         ]})
                     setup = call('setup', setup_request)
                     assert setup['native_version'] == expected_version, setup['native_version']
+                    assert setup['contract_version'] == 1
                     base64.b64decode(setup['public_key'], validate=True)
+                    reject('setup', setup_request)
+                    authority = api(mount + '/authority?public_key_format=reference')['data']
+                    assert authority['public_key_fingerprint'] == setup['public_key_fingerprint']
+                    if scheme == 'covercrypt':
+                        assert json.loads(authority['config_json']) == json.loads(setup_request['config_json'])
+                        reject('genkey', {'scheme': scheme, 'attributes': 'UnknownDimension::value'})
+                        reject('encrypt', {'scheme': scheme, 'policy': policy,
+                            'plaintext': 'YQ==', 'public_key': 'vault-authority-sha256:' + '0' * 64})
                     user = call('genkey', {'scheme': scheme, 'attributes': attrs})
                     denied = call('genkey', {'scheme': scheme, 'attributes': wrong})
                     plain = base64.b64encode(b'CPQA real crypto\x00\xff').decode()
                     cipher = call('encrypt', {'scheme': scheme, 'policy': policy,
-                                             'plaintext': plain, 'public_key': setup['public_key']})
+                                             'plaintext': plain, 'public_key': authority['public_key'], 'sign': signed})
+                    metadata = cipher['crypto_metadata']
+                    assert metadata['scheme'] == scheme and metadata['format'] == 'hybrid-v2'
+                    assert metadata['pqc_signed'] is signed and metadata['keyset_id'] == authority['public_key_fingerprint']
                     request = {'ciphertext': cipher['ciphertext'], 'secret_key': user['secret_key']}
                     if signed:
                         request['pqc_public_key'] = setup['pqc_public_key']

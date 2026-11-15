@@ -498,6 +498,11 @@ def main(argv: list[str]) -> int:
             run(add_manage_args(c + ["exec", "web", "python", "manage.py", "seed_policies"], []))
             print(color_info("\n[4/4] Seeding test users & ABAC attributes..."))
             run(add_manage_args(c + ["exec", "web", "python", "manage.py", "seed_test_data"], []))
+            if (env_vars.get("CPABE_SCHEME", "").strip().lower() == "covercrypt" and
+                    env_vars.get("USE_VAULT_ABE_PLUGIN", "").strip().lower() in ("true", "1", "t", "yes", "on")):
+                print(color_info("\nInitializing CoverCrypt authority in Vault..."))
+                run(c + ["exec", "web", "python", "manage.py", "covercrypt_config", "--initialize-vault",
+                         "--keyset-id", "primary"])
             
             extract_pqc_raw_key(c)
             if args.ai:
@@ -555,29 +560,29 @@ def main(argv: list[str]) -> int:
             if ans_v_ai.lower() == 'y':
                 vols_to_remove.extend([f"{project_name}_ollama_data"])
             if ans_v_keys.lower() == 'y':
-                vols_to_remove.extend([f"{project_name}_keys_volume", f"{project_name}_vault_data", f"{project_name}_vault_plugins"])
-                # Also remove host-side Vault unseal keys and token files
-                # These MUST be deleted when Vault data is wiped, otherwise
-                # stale keys will fail to unseal the fresh Vault instance.
-                keys_dir = env_vars.get("KEYS_DIR", "")
-                if keys_dir:
-                    keys_path = os.path.join(REPO_ROOT, keys_dir) if not os.path.isabs(keys_dir) else keys_dir
-                    for fname in ["vault_unseal_keys.json", "vault_token.txt"]:
-                        fpath = os.path.join(keys_path, fname)
-                        if os.path.exists(fpath):
-                            os.remove(fpath)
-                            print(f"  Removed {fpath}")
+                vols_to_remove[:0] = [
+                    f"{project_name}_vault_data", f"{project_name}_vault_plugins", f"{project_name}_keys_volume",
+                ]
             if ans_v_vpn.lower() == 'y':
                 vols_to_remove.extend([f"{project_name}_openvpn_data", f"{project_name}_openvpn_standard_data"])
             if ans_v_media.lower() == 'y':
                 vols_to_remove.extend([f"{project_name}_local_media_volume"])
                 
             if vols_to_remove:
+                existing = set(subprocess.check_output(
+                    ["docker", "volume", "ls", "--format", "{{.Name}}"], text=True,
+                ).splitlines())
                 for vol in vols_to_remove:
-                    try:
-                        subprocess.run(["docker", "volume", "rm", vol], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except subprocess.CalledProcessError:
-                        pass
+                    if vol in existing:
+                        run(["docker", "volume", "rm", vol])
+                # Keep the host credentials if Docker could not remove the selected volumes.
+                if ans_v_keys.lower() == 'y' and env_vars.get("KEYS_DIR"):
+                    keys_path = REPO_ROOT / env_vars["KEYS_DIR"]
+                    for name in ("vault_unseal_keys.json", "vault_token.txt"):
+                        credential = keys_path / name
+                        if credential.exists():
+                            credential.unlink()
+                            print(f"  Removed {credential}")
                 print("[OK] Selected volumes removed.")
                 
             if ans_p.lower() == 'y':

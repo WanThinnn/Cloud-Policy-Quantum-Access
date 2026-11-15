@@ -18,6 +18,8 @@ from ..models import AttributeDefinition, UserType, UserProfile
 
 MANIFEST_FORMAT_VERSION = 1
 MANIFEST_KEY_PREFIX = "COVERCRYPT_KEYSET_MANIFEST_"
+AUTHORITY_HISTORY_KEY = "COVERCRYPT_AUTHORITY_HISTORY_v1"
+_VAULT_MOUNT_RE = re.compile(r"abe_covercrypt(?:_[a-z0-9][a-z0-9_-]{0,47})?")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -158,6 +160,42 @@ def parse_keyset_manifest(raw_manifest: Any) -> dict[str, Any]:
     if not isinstance(raw_manifest, dict):
         raise CoverCryptConfigurationError("Stored CoverCrypt keyset manifest must be an object")
     return raw_manifest
+
+
+def validate_vault_mount(mount: str) -> str:
+    if not isinstance(mount, str) or not _VAULT_MOUNT_RE.fullmatch(mount):
+        raise CoverCryptConfigurationError("Invalid CoverCrypt Vault mount")
+    return mount
+
+
+def configuration_from_manifest(manifest: dict[str, Any]) -> CoverCryptConfiguration:
+    """Reconstruct a historical configuration without consulting the current schema."""
+    config = manifest.get("config")
+    versions = manifest.get("attribute_versions")
+    if not isinstance(config, dict) or set(config) != {"dimensions"} or not isinstance(versions, dict):
+        raise CoverCryptConfigurationError("Invalid historical CoverCrypt configuration")
+    dimensions = config["dimensions"]
+    if not isinstance(dimensions, list) or not dimensions:
+        raise CoverCryptConfigurationError("Missing historical CoverCrypt dimensions")
+    names = []
+    for dimension in dimensions:
+        if not isinstance(dimension, dict) or set(dimension) != {"name", "attributes", "hierarchical"}:
+            raise CoverCryptConfigurationError("Invalid historical CoverCrypt dimension")
+        name = dimension["name"]
+        _validate_identifier(name, "Dimension name")
+        _validate_values(name, dimension["attributes"])
+        if dimension["hierarchical"] is not False:
+            raise CoverCryptConfigurationError("Unsupported historical CoverCrypt hierarchy")
+        names.append(name)
+    if names != sorted(set(names)) or set(versions) != set(names) or any(
+        type(version) is not int or version < 1 for version in versions.values()
+    ):
+        raise CoverCryptConfigurationError("Invalid historical CoverCrypt dimension versions")
+    payload = {"config": config, "attribute_versions": versions}
+    fingerprint = "sha256:" + hashlib.sha256(canonical_json(payload).encode("ascii")).hexdigest()
+    if fingerprint != manifest.get("config_fingerprint"):
+        raise CoverCryptConfigurationError("Historical CoverCrypt configuration fingerprint differs")
+    return CoverCryptConfiguration(dimensions, versions, fingerprint)
 
 
 def verify_keyset_manifest(
