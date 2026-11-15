@@ -219,9 +219,13 @@
                 </div>
                 <div class="p-4 md:p-5 space-y-4">
                     <p class="text-sm text-gray-500 dark:text-gray-400">Choose where to save your signing passkey in the browser prompt. You can use a device or a synced passkey provider if it supports WebAuthn PRF. The browser may ask you to verify twice.</p>
+                    <p class="text-sm text-gray-600 dark:text-gray-300">
+                        <strong>On Windows:</strong> For cloud sync, use Chrome with Google Password Manager. In Brave, choose a synced provider that supports PRF.
+                        Microsoft Password Manager in Edge may fail to unlock signing keys. For local storage, choose <strong>This Windows</strong> (Windows Hello).
+                    </p>
                     
                     <button id="btn-pqc-setup" class="w-full text-white bg-indigo-600 hover:bg-indigo-700 focus:ring-4 focus:outline-none focus:ring-indigo-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-indigo-600 dark:hover:bg-indigo-700 dark:focus:ring-indigo-800">
-                        Choose a passkey
+                        Choose a location to save your passkey
                     </button>
                     <button id="btn-pqc-setup-recovery" type="button" class="w-full rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 dark:border-gray-600 dark:text-gray-200">
                         Use a recovery phrase only

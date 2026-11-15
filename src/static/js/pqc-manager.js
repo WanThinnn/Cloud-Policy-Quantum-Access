@@ -596,7 +596,7 @@ function openPqcSetup() {
     const status = document.getElementById('pqc-setup-status');
     status.textContent = '';
     status.classList.add('hidden');
-    document.getElementById('btn-pqc-setup').textContent = 'Choose a passkey';
+    document.getElementById('btn-pqc-setup').textContent = 'Choose a location to save your passkey';
     document.getElementById('pqc-setup-modal').classList.remove('hidden');
 }
 
