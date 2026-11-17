@@ -309,7 +309,9 @@ def main(argv: list[str]) -> int:
 
     vault_cmd = ["exec", "web", "python", "vault_manager.py"]
     if args.prod:
-        vault_cmd.append("--prod")
+        vault_cmd = ["exec", "-T", "web", "python", "manage.py", "check_vault_runtime"]
+
+    vault_wait_message = "[+] Checking production Vault runtime access..." if args.prod else "[+] Waiting for Vault and running auto-unseal..."
 
     compose_file = REPO_ROOT / "docker" / ("docker-compose.prod.yml" if args.prod else "docker-compose.yml")
     env_vars = load_env_file(ENV_FILE)
@@ -403,7 +405,7 @@ def main(argv: list[str]) -> int:
             
             print(color_info("\n[3/3] Restarting containers..."))
             run(c + ["up", "-d"])
-            print(color_info(f"\n[+] Waiting for Vault to start and running Auto-Unseal..."))
+            print(color_info(f"\n{vault_wait_message}"))
             import time
             success = False
             for _ in range(10):
@@ -414,7 +416,7 @@ def main(argv: list[str]) -> int:
                 except subprocess.CalledProcessError:
                     time.sleep(2)
             if not success:
-                print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
                 return 1
             
             extract_pqc_raw_key(c)
@@ -426,7 +428,7 @@ def main(argv: list[str]) -> int:
         elif cmd in {"up"}:
             # print(f"{status_line}\n")
             run(c + ["up", "-d"])
-            print(color_info(f"\n[+] Waiting for Vault to start and running Auto-Unseal..."))
+            print(color_info(f"\n{vault_wait_message}"))
             import time
             success = False
             for _ in range(10):
@@ -437,7 +439,7 @@ def main(argv: list[str]) -> int:
                 except subprocess.CalledProcessError:
                     time.sleep(2)
             if not success:
-                print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
                 return 1
             
             extract_pqc_raw_key(c)
@@ -456,7 +458,7 @@ def main(argv: list[str]) -> int:
         elif cmd == "restart":
             # print(f"{status_line}\n")
             run(c + ["restart"])
-            print(color_info(f"\n[+] Waiting for Vault to start and running Auto-Unseal..."))
+            print(color_info(f"\n{vault_wait_message}"))
             import time
             success = False
             for _ in range(10):
@@ -467,7 +469,7 @@ def main(argv: list[str]) -> int:
                 except subprocess.CalledProcessError:
                     time.sleep(2)
             if not success:
-                print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
                 return 1
             
             extract_pqc_raw_key(c)
@@ -487,6 +489,9 @@ def main(argv: list[str]) -> int:
             # print(f"{status_line}\n")
             run(add_manage_args(c + ["exec", "web", "python", "manage.py", "migrate"], extra))
         elif cmd == "initdata":
+            if args.prod:
+                print(color_warning("Initialize production Vault and the application separately. See docs/vi/vault-runtime.md."))
+                return 1
             # print(f"{status_line}\n")
             print(color_info("\n[0/4] Initializing and unsealing Vault..."))
             run(c + vault_cmd)
@@ -596,11 +601,11 @@ def main(argv: list[str]) -> int:
             run(compose_cmd(compose_files, use_ssl, use_tunnel, args.vpn) + ["down", "-v"])
             run(compose_cmd(compose_files, use_ssl, use_tunnel, args.vpn) + ["build", "--no-cache"])
             run(compose_cmd(compose_files, use_ssl, use_tunnel, args.vpn) + ["up", "-d"])
-            print(color_info(f"\n[+] Waiting for Vault to start and running Auto-Unseal..."))
+            print(color_info(f"\n{vault_wait_message}"))
             try:
                 run(c + vault_cmd)
             except subprocess.CalledProcessError:
-                print(color_warning("Could not run vault_manager.py. The web container might still be starting."))
+                print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
                 return 1
             
             extract_pqc_raw_key(c)

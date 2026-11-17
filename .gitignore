@@ -534,3 +534,5 @@ docs/vi/release-3.1-readiness.md
 !/src/lib/README.md
 /src/vault-plugin/
 /docker/vault/plugins/
+docs/plan/key-lifecycle-native-signing-e2ee-plan.md
+config/vault-runtime/

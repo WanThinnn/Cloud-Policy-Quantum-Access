@@ -209,6 +209,7 @@ OLLAMA_CACERT = os.environ.get('OLLAMA_CACERT', '/certs/CyberFortress-RootCA.crt
 
 # Vault ABE Plugin Integration Toggle
 USE_VAULT_ABE_PLUGIN = os.environ.get('USE_VAULT_ABE_PLUGIN', 'False').lower() in ('true', '1', 't')
+VAULT_ABE_INTERNAL_DECRYPT = os.environ.get('VAULT_ABE_INTERNAL_DECRYPT', 'False').lower() in ('true', '1', 't')
 CPABE_SCHEME = os.environ.get('CPABE_SCHEME', 'ac17')
 
 # Email Configuration

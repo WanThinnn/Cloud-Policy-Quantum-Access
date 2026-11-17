@@ -16,6 +16,23 @@ class VaultService:
     def _init(self):
         self.vault_addr = os.environ.get('VAULT_ADDR', 'http://localhost:8200')
         self.secret_path = os.environ.get('VAULT_SECRET_PATH', 'secret/data/crypto_access')
+        self.runtime_only = os.environ.get('VAULT_RUNTIME_ONLY', '').lower() == 'true'
+        ca_cert_path = os.environ.get('VAULT_CACERT', '/certs/CyberFortress-RootCA.crt')
+        if self.runtime_only:
+            if not self.vault_addr.startswith('https://') or not os.path.isfile(ca_cert_path):
+                raise RuntimeError('Vault runtime requires HTTPS and an installed CA certificate.')
+            token_path = os.environ.get('VAULT_RUNTIME_TOKEN_FILE', '/run/cpqa-vault/token')
+            try:
+                with open(token_path, encoding='utf-8') as token_file:
+                    self.vault_token = token_file.read().strip()
+            except OSError:
+                raise RuntimeError('The Vault runtime token file is unavailable.') from None
+            if not self.vault_token or self.vault_token == 'root':
+                raise RuntimeError('A dedicated Vault runtime token is required.')
+            self.client = hvac.Client(url=self.vault_addr, token=self.vault_token, verify=ca_cert_path, timeout=30)
+            self._cache = {}
+            self._runtime_token_verified = False
+            return
         
         # Try to read token from file first (written by auto-unseal script)
         keys_dir = os.environ.get('KEYS_DIR', '/app/config/keys')
@@ -45,6 +62,7 @@ class VaultService:
         if not self.client:
             return False
         try:
+            self.check_runtime_token()
             return self.client.is_authenticated()
         except Exception as e:
             logger.error(f"Failed to check Vault authentication: {e}")
@@ -54,6 +72,8 @@ class VaultService:
         """Retrieve a secret from Vault. Uses simple memory cache."""
         if key_name.startswith(('COVERCRYPT_', 'CPABE_PK_COVERCRYPT', 'CPABE_MSK_COVERCRYPT',
                                 'PQC_PK_COVERCRYPT', 'PQC_SK_COVERCRYPT')):
+            return self.get_secrets([key_name]).get(key_name, default)
+        if getattr(self, 'runtime_only', False):
             return self.get_secrets([key_name]).get(key_name, default)
         if key_name in self._cache:
             return self._cache[key_name]
@@ -150,7 +170,20 @@ class VaultService:
 
     @property
     def get_token(self):
+        self.check_runtime_token()
         return self.vault_token
+
+    def check_runtime_token(self):
+        if not getattr(self, 'runtime_only', False) or self._runtime_token_verified:
+            return
+        try:
+            data = self.client.auth.token.lookup_self()['data']
+            policies = set(data['policies']) | set(data.get('identity_policies') or ())
+            if policies != {'cpqa-runtime'} or data['ttl'] <= 0:
+                raise ValueError()
+        except (hvac.exceptions.VaultError, KeyError, TypeError, ValueError):
+            raise RuntimeError('Vault runtime requires a non-expired cpqa-runtime token.') from None
+        self._runtime_token_verified = True
 
     @property
     def get_addr(self):

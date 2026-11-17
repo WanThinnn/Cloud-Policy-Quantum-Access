@@ -18,6 +18,7 @@ def store_smtp_password(password):
     try:
         if vault_service.client is None:
             raise RuntimeError
+        vault_service.check_runtime_token()
         vault_service.client.secrets.kv.v2.create_or_update_secret(
             path=path, secret={'password': password}, cas=0,
         )
@@ -34,6 +35,7 @@ def get_smtp_password():
     if not isinstance(reference, str) or not re.fullmatch(re.escape(PREFIX) + r'[0-9a-f]{32}', reference):
         raise RuntimeError('Invalid SMTP credential reference.')
     try:
+        vault_service.check_runtime_token()
         result = vault_service.client.secrets.kv.v2.read_secret_version(path=reference)
         password = result['data']['data']['password']
         if not isinstance(password, str):

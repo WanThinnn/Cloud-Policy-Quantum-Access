@@ -30,7 +30,8 @@ from crypto_access.views import storage as storage_views
 
 
 @skipUnless(os.environ.get('CPQA_TEST_VAULT_ADDR'), 'requires the disposable Vault contract runner')
-@override_settings(USE_VAULT_ABE_PLUGIN=True, ENABLE_PQC_FEATURES=True, CPABE_SCHEME='covercrypt')
+@override_settings(USE_VAULT_ABE_PLUGIN=True, ENABLE_PQC_FEATURES=True, CPABE_SCHEME='covercrypt',
+                   VAULT_ABE_INTERNAL_DECRYPT=os.environ.get('CPQA_TEST_INTERNAL_DECRYPT') == '1')
 class VaultContractIntegrationTests(TestCase):
     def setUp(self):
         address = os.environ['CPQA_TEST_VAULT_ADDR']
@@ -128,7 +129,7 @@ class VaultContractIntegrationTests(TestCase):
         self.assertEqual(original.crypto_metadata, original_metadata)
         self.assertEqual(file.get_latest_version().crypto_metadata['scheme'], 'ac17')
 
-    def test_download_denies_regular_user_after_attribute_change_with_warm_cache(self):
+    def test_download_denies_regular_user_after_attribute_change(self):
         response = self.upload(self.policy('department_policy'))
         self.assertEqual(response.status_code, 201, response.data)
         file = UploadedFile.find_by_path('documents', 'contract.txt')
@@ -144,6 +145,57 @@ class VaultContractIntegrationTests(TestCase):
         grant.save(update_fields=['value'])
         denied = self.client.get(url)
         self.assertIn(denied.status_code, (403, 404))
+
+    def test_preview_and_download_do_not_use_files_or_cached_vault_keys(self):
+        response = self.upload(self.policy('memory_only_policy'))
+        self.assertEqual(response.status_code, 201, response.data)
+        file = UploadedFile.find_by_path('documents', 'contract.txt')
+        with (patch.object(storage_views.tempfile, 'NamedTemporaryFile') as key_file,
+              patch.object(self.service, 'generate_user_key', side_effect=AssertionError('file-based keygen')),
+              patch.object(storage_views.UploadedFileViewSet, '_native_user_key',
+                           side_effect=AssertionError('existing cache must never be read in Vault mode')),
+              patch.object(self.service, 'generate_user_key_bytes', wraps=self.service.generate_user_key_bytes) as keygen):
+            for url in (f'/api/storage/files/{file.pk}/download/',
+                        '/api/storage/files/preview_by_path/?path=contract.txt&bucket=documents'):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200, getattr(response, 'data', None))
+            key_file.assert_not_called()
+            self.assertEqual(keygen.call_count, 0 if os.environ.get('CPQA_TEST_INTERNAL_DECRYPT') == '1' else 2)
+
+    @skipUnless(os.environ.get('CPQA_TEST_INTERNAL_DECRYPT') == '1', 'requires internal-decrypt plugin')
+    def test_runtime_token_can_decrypt_without_user_key_export(self):
+        from runpy import run_path
+
+        provision = run_path('/tmp/fixture_vault_operator.py')['provision']
+        response = self.upload(self.policy('least_privilege_policy'))
+        self.assertEqual(response.status_code, 201, response.data)
+        file = UploadedFile.find_by_path('documents', 'contract.txt')
+        self.assertTrue(self.vault.put_secrets({
+            'MASTER_FIELD_ENCRYPTION_KEY': 'fixture-field-key',
+            'CPABE_MSK': 'operator-only-fixture',
+        }))
+        token = provision(self.vault.client, 'isolated-contract', False, [])
+        runtime = object.__new__(VaultService)
+        runtime.runtime_only = True
+        runtime._runtime_token_verified = False
+        runtime.vault_addr = self.vault.get_addr
+        runtime.vault_token = token
+        runtime.secret_path = 'secret/data/cpqa-runtime'
+        runtime._cache = {}
+        runtime.client = hvac.Client(url=runtime.vault_addr, token=token)
+        self.assertEqual(runtime.get_token, token)
+        self.assertEqual(runtime.get_secrets(['CPABE_MSK']), {})
+        for endpoint in ('setup', 'genkey', 'decrypt', 'add_dimension'):
+            denied = requests.put(f'{runtime.get_addr}/v1/abe_covercrypt/{endpoint}',
+                                  headers={'X-Vault-Token': token}, json={}, timeout=5)
+            self.assertEqual(denied.status_code, 403)
+        with self.assertRaises(hvac.exceptions.Forbidden):
+            runtime.client.secrets.kv.v2.read_secret_version(path='isolated-contract', raise_on_deleted_version=True)
+        with (patch.object(crypto_module, 'vault_service', runtime),
+              patch.object(self.service, 'generate_user_key_bytes', side_effect=AssertionError('USK export'))):
+            downloaded = self.client.get(f'/api/storage/files/{file.pk}/download/')
+        self.assertEqual(downloaded.status_code, 200, getattr(downloaded, 'data', None))
+        self.assertEqual(downloaded.content, b'isolated-version-1')
 
     def test_failed_setup_never_uploads_plaintext(self):
         with patch.object(self.service, '_ensure_covercrypt_keyset', side_effect=CPABEError('fixture setup failure')):
@@ -191,6 +243,104 @@ class VaultContractIntegrationTests(TestCase):
         self.assertEqual(response.status_code, 500)
         self.storage.upload_file.assert_not_called()
         self.assertEqual(FileVersion.objects.count(), 0)
+
+    def test_keygen_outage_returns_service_unavailable_without_plaintext(self):
+        response = self.upload(self.policy('keygen_outage_policy'))
+        self.assertEqual(response.status_code, 201, response.data)
+        file = UploadedFile.find_by_path('documents', 'contract.txt')
+        with patch.object(crypto_module.requests, 'put', side_effect=requests.Timeout('private-fixture')):
+            response = self.client.get(f'/api/storage/files/{file.pk}/download/')
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertNotIn(b'private-fixture', response.content)
+        self.assertNotIn(b'isolated-version-1', response.content)
+
+    @skipUnless(os.environ.get('CPQA_TEST_RESTORE_SHARE'), 'requires a disposable restore fixture')
+    def test_disposable_backup_restore_drill(self):
+        from django.core import serializers
+        from time import monotonic, sleep
+
+        response = self.upload(self.policy('disposable_backup_policy'))
+        self.assertEqual(response.status_code, 201, response.data)
+        file = UploadedFile.find_by_path('documents', 'contract.txt')
+        version = file.get_latest_version()
+        db_backup = serializers.serialize('json', [version])
+        blob_backup = bytes(self.blobs[version.physical_path])
+        uri = f'{self.vault.get_addr}/v1/sys/storage/raft/snapshot'
+        headers = {'X-Vault-Token': self.vault.get_token}
+        self.assertTrue(self.vault.put_secrets({'FIXTURE_RESTORE_GENERATION': 'saved'}))
+        snapshot = requests.get(uri, headers=headers, timeout=90)
+        snapshot.raise_for_status()
+        self.assertTrue(self.vault.put_secrets({'FIXTURE_RESTORE_GENERATION': 'modified'}))
+        self.blobs.pop(version.physical_path)
+        file.versions.filter(pk=version.pk).delete()
+
+        started = monotonic()
+        restored = requests.post(uri, headers=headers, data=snapshot.content, timeout=90)
+        restored.raise_for_status()
+        deadline = monotonic() + 35
+        while monotonic() < deadline:
+            try:
+                if self.vault.client.sys.is_sealed():
+                    self.vault.client.sys.submit_unseal_key(os.environ['CPQA_TEST_RESTORE_SHARE'])
+                if self.vault.get_secrets(['FIXTURE_RESTORE_GENERATION']).get('FIXTURE_RESTORE_GENERATION') == 'saved':
+                    break
+            except (hvac.exceptions.VaultError, requests.RequestException, RuntimeError):
+                pass
+            sleep(0.3)
+        else:
+            self.fail('Restored Raft snapshot did not become available')
+        for obj in serializers.deserialize('json', db_backup):
+            obj.save()
+        self.blobs[version.physical_path] = blob_backup
+        url = f'/api/storage/files/{file.pk}/download/'
+        downloaded = self.client.get(url)
+        self.assertEqual(downloaded.status_code, 200, getattr(downloaded, 'data', None))
+        self.assertEqual(downloaded.content, b'isolated-version-1')
+        reader = User.objects.create_user('restore_denied')
+        UserProfile.objects.create(user=reader, user_type='data_user')
+        self.client.force_authenticate(reader)
+        self.assertIn(self.client.get(url).status_code, (403, 404))
+        print(f'Disposable Raft snapshot + version row + blob restored and checked in {monotonic() - started:.2f}s.')
+
+    @skipUnless(os.environ.get('CPQA_TEST_VAULT_BENCHMARK') == '1', 'opt-in load measurement')
+    def test_benchmark_uncached_vault_reads(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from math import ceil
+        from statistics import median
+        from time import perf_counter
+
+        attrs = {'department': 'it', 'user_type': 'super_admin'}
+        failures = 0
+        for scheme in ('ac17', 'tkn20', 'covercrypt'):
+            with override_settings(CPABE_SCHEME=scheme):
+                compiled = self.policy(f'benchmark_{scheme}').cpabe_policy
+            for size in (4096, 1024**2, 8 * 1024**2):
+                plaintext = b'x' * size
+                ciphertext, metadata = self.service.encrypt_version(plaintext, compiled, scheme, True)
+
+                def read(_):
+                    start = perf_counter()
+                    try:
+                        route = self.service.verify_version_authority(metadata)
+                        key = self.service.generate_user_key_bytes(attrs, scheme=scheme, route=route)
+                        data = self.service.decrypt_buffer_and_verify(key, ciphertext, scheme=scheme, route=route)
+                        matches = data == plaintext
+                    except (CPABEError, requests.RequestException):
+                        matches = False
+                    return (perf_counter() - start) * 1000, matches
+
+                for concurrent in (1, 4):
+                    with ThreadPoolExecutor(max_workers=concurrent) as pool:
+                        results = list(pool.map(read, range(8)))
+                    timings = sorted(elapsed for elapsed, matches in results if matches)
+                    failed = len(results) - len(timings)
+                    failures += failed
+                    print(json.dumps({
+                        'scheme': scheme, 'bytes': size, 'concurrency': concurrent, 'requests': len(results),
+                        'errors': failed, 'p50_ms': round(median(timings), 1) if timings else None,
+                        'p95_ms': round(timings[ceil(.95 * len(timings)) - 1], 1) if timings else None,
+                    }), flush=True)
+        self.assertEqual(failures, 0)
 
     def test_z_rotation_keeps_signed_history_and_restores_verified_ciphertext(self):
         policy = self.policy('historical_rotation_policy')

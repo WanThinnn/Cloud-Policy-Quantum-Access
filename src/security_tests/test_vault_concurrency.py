@@ -2,7 +2,9 @@
 import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import Mock
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
 
 import hvac
 from django.test import SimpleTestCase
@@ -46,6 +48,30 @@ def worker(kv):
 
 
 class VaultConcurrencyTests(SimpleTestCase):
+    def test_runtime_bootstrap_uses_only_the_runtime_token_and_checks_its_policies(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory)
+            for name, content in (('ca.crt', 'test-ca'), ('runtime-token', 'runtime-fixture'),
+                                  ('vault_token.txt', 'operator-fixture')):
+                (path / name).write_text(content, encoding='utf-8')
+            with patch.dict('os.environ', {
+                'VAULT_RUNTIME_ONLY': 'true', 'VAULT_ADDR': 'https://vault.test',
+                'VAULT_CACERT': str(path / 'ca.crt'), 'VAULT_RUNTIME_TOKEN_FILE': str(path / 'runtime-token'),
+                'KEYS_DIR': str(path), 'VAULT_TOKEN': 'root',
+            }), patch('crypto_access.services.vault_service.hvac.Client') as client:
+                service = object.__new__(VaultService)
+                service._init()
+                self.assertEqual(client.call_args.kwargs['token'], 'runtime-fixture')
+                client.return_value.auth.token.lookup_self.return_value = {'data': {
+                    'policies': ['cpqa-runtime'], 'identity_policies': ['operator'], 'ttl': 60,
+                }}
+                with self.assertRaisesRegex(RuntimeError, 'cpqa-runtime'):
+                    service.check_runtime_token()
+                client.return_value.auth.token.lookup_self.return_value['data']['identity_policies'] = []
+                self.assertEqual(service.get_token, 'runtime-fixture')
+                (path / 'runtime-token').unlink()
+                with self.assertRaisesRegex(RuntimeError, 'token file'):
+                    object.__new__(VaultService)._init()
     def test_concurrent_writes_keep_both_updates(self):
         kv = VersionedKV()
         with ThreadPoolExecutor(2) as pool:

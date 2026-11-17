@@ -2,6 +2,7 @@
 import base64
 import struct
 from unittest.mock import Mock, patch
+import requests
 
 from django.test import SimpleTestCase
 from crypto_access.services import cpabe_service as module
@@ -11,6 +12,41 @@ from security_tests.vault_contract_fixtures import authority_data
 
 
 class UpstreamCryptoContractTests(SimpleTestCase):
+    def test_vault_genkey_returns_bytes_and_applies_bounded_timeout(self):
+        service, vault, response, _, _ = self.fixture('ac17', False)
+        response.json.return_value = {'data': {'secret_key': 'AQID'}}
+        with patch.object(module, 'vault_service', vault), patch.object(module.requests, 'put', return_value=response) as put:
+            self.assertEqual(service.generate_user_key_bytes({'department': 'it'}, scheme='ac17'), b'\x01\x02\x03')
+        self.assertTrue(put.call_args.args[0].endswith('/abe_ac17/genkey'))
+        self.assertEqual(put.call_args.kwargs['timeout'], module.VAULT_BUFFER_TIMEOUT)
+
+    def test_vault_rejects_malformed_keys_and_hides_transport_details(self):
+        service, vault, response, _, _ = self.fixture('ac17', False)
+        with patch.object(module, 'vault_service', vault), patch.object(module.requests, 'put', return_value=response) as put:
+            for bad in ('secret-fixture!', '', None, 10):
+                response.json.return_value = {'data': {'secret_key': bad}}
+                with self.subTest(result_type=type(bad).__name__), self.assertRaises(module.CPABEVaultUnavailable) as error:
+                    service.generate_user_key_bytes({'department': 'it'}, scheme='ac17')
+                self.assertEqual(str(error.exception), 'Vault genkey returned an invalid result.')
+            for failure in (requests.Timeout('private-fixture'), requests.ConnectionError('private-fixture')):
+                put.side_effect = failure
+                with self.assertRaises(module.CPABEVaultUnavailable) as error:
+                    service.generate_user_key_bytes({'department': 'it'}, scheme='ac17')
+                self.assertEqual(str(error.exception), 'Vault genkey is unavailable.')
+                self.assertTrue(error.exception.__suppress_context__)
+
+    def test_vault_distinguishes_decrypt_denial_from_sealed_or_unauthenticated(self):
+        service, vault, response, _, ciphertext = self.fixture('ac17', False)
+        with patch.object(module, 'vault_service', vault), patch.object(module.requests, 'put', return_value=response):
+            for status, error in ((400, module.CPABEAccessDenied), (403, module.CPABEVaultUnavailable),
+                                  (503, module.CPABEVaultUnavailable)):
+                denied = requests.Response()
+                denied.status_code = status
+                response.raise_for_status.side_effect = requests.HTTPError('private-fixture', response=denied)
+                with self.subTest(status=status), self.assertRaises(error) as caught:
+                    service.decrypt_buffer(b'key-fixture', ciphertext, scheme='ac17')
+                self.assertNotIn('private-fixture', str(caught.exception))
+
     def fixture(self, scheme, signed):
         service = object.__new__(module.CPABEService)
         service.use_vault_plugin = True

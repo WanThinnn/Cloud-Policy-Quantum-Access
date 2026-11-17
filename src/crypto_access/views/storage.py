@@ -37,7 +37,7 @@ from ..serializers.storage import (
 )
 from ..serializers.policy import AccessPolicySerializer
 from ..services.storage.factory import get_storage_service
-from ..services.cpabe_service import CPABEAccessDenied, cpabe_service
+from ..services.cpabe_service import CPABEAccessDenied, CPABEVaultUnavailable, cpabe_service
 from ..services.casbin_service import casbin_service
 from ..services.tkn20_policy import bypass_attributes
 from ..services.document_access import can_bypass_document_policy, is_document_administrator, requires_document_policy
@@ -45,7 +45,6 @@ from ..services.version_crypto import (
     CryptoMetadataError, PLAINTEXT_METADATA, metadata_for_read, persist_verified_metadata, validate_metadata,
 )
 from ..throttles import CPABEDecryptThrottle, CPABEEncryptThrottle
-import tempfile
 import time
 
 def get_db_file_by_path(bucket_name, file_path):
@@ -53,6 +52,12 @@ def get_db_file_by_path(bucket_name, file_path):
     return UploadedFile.find_by_path(bucket_name, file_path)
 
 logger = logging.getLogger('crypto_access.storage')
+
+
+class CryptoServiceUnavailable(APIException):
+    status_code = 503
+    default_detail = 'The Vault crypto service is temporarily unavailable.'
+    default_code = 'crypto_service_unavailable'
 
 
 class StorageBucketViewSet(viewsets.ModelViewSet):
@@ -160,12 +165,12 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         abe_scheme = crypto_metadata['scheme']
         route = None
         if crypto_metadata['schema'] == 2 or (backend == 'vault' and abe_scheme == 'covercrypt'):
-            route = cpabe_service.verify_version_authority(crypto_metadata)
+            try:
+                route = cpabe_service.verify_version_authority(crypto_metadata)
+            except CPABEVaultUnavailable:
+                raise CryptoServiceUnavailable() from None
         crypto_options = {'route': route} if route is not None else {}
 
-        from ..models import KeyRevocation
-        revocation_id = KeyRevocation.user_cache_generation(user.id)
-            
         user_attrs = casbin_service.get_user_attributes(user)
         
         # CP-ABE Bypass for SuperAdmin and File Owner
@@ -197,6 +202,47 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                             if user_attrs[k] != v:
                                 user_attrs[k] = [user_attrs[k], v]
         
+        try:
+            internal_decrypt = backend == 'vault' and getattr(settings, 'VAULT_ABE_INTERNAL_DECRYPT', False)
+            if internal_decrypt:
+                key = None
+            elif backend == 'vault':
+                key = cpabe_service.generate_user_key_bytes(user_attrs, scheme=abe_scheme, **crypto_options)
+            else:
+                key = self._native_user_key(user, user_attrs, abe_scheme, strict, privileged_bypass)
+            decrypt = (cpabe_service.decrypt_buffer_and_verify if crypto_metadata['pqc_signed']
+                       else cpabe_service.decrypt_buffer)
+            try:
+                if internal_decrypt:
+                    decrypted = cpabe_service.decrypt_with_attributes(user_attrs, file_data, crypto_metadata, **crypto_options)
+                else:
+                    decrypted = decrypt(key, file_data, scheme=abe_scheme, **crypto_options)
+            except CPABEAccessDenied:
+                if legacy_metadata:
+                    raise CryptoMetadataError('Historical crypto metadata could not be verified; recovery is required.') from None
+                raise
+            except CPABEVaultUnavailable:
+                raise
+            except Exception as exc:
+                logger.error('CP-ABE decryption failed (%s).', type(exc).__name__)
+                if legacy_metadata:
+                    raise CryptoMetadataError('Historical crypto metadata could not be verified; recovery is required.') from None
+                raise Exception("You don't have permission to see this file!") from None
+            finally:
+                del key
+        except CPABEVaultUnavailable:
+            raise CryptoServiceUnavailable() from None
+        except CPABEAccessDenied as exc:
+            raise PermissionDenied(str(exc)) from exc
+
+        if legacy_metadata:
+            persist_verified_metadata(file_version, crypto_metadata)
+        return decrypted
+
+    def _native_user_key(self, user, user_attrs, abe_scheme, strict, privileged_bypass):
+        from ..models import KeyRevocation
+
+        revocation_id = KeyRevocation.user_cache_generation(user.id)
         # Calculate cache key based on attributes
         attrs_str = json.dumps(user_attrs, sort_keys=True)
         attrs_hash = hashlib.sha3_256(attrs_str.encode('utf-8')).hexdigest()
@@ -212,11 +258,10 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         if abe_scheme == 'covercrypt':
             # User keys are authority/configuration specific; do not reuse a cache
             # entry after an operator changes CoverCrypt dimensions or keyset.
-            cache_key += f'_authority_{cpabe_service.covercrypt_cache_identity(**crypto_options)}'
-        cache_key += f'_meta_v1_{backend}'
-        if revocation_id or crypto_metadata['schema'] == 2:
-            identity = (f"{cache_key}:{revocation_id}:{crypto_metadata.get('keyset_id', '')}:"
-                        f"{crypto_metadata.get('authority_revision', '')}")
+            cache_key += f'_authority_{cpabe_service.covercrypt_cache_identity()}'
+        cache_key += '_meta_v1_native'
+        if revocation_id:
+            identity = f'{cache_key}:{revocation_id}::'
             cache_key = f'cpabe_key_{abe_scheme}_scoped_{user.id}_{hashlib.sha256(identity.encode()).hexdigest()}'
         encrypted_cached_key = cache.get(cache_key)
         
@@ -228,63 +273,24 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         if encrypted_cached_key:
             try:
                 cached_key_data = decrypt_bytes(encrypted_cached_key, info=cache_info, aad=cache_aad)
-            except Exception as e:
-                logger.warning(f"Failed to decrypt cached key data, regenerating... Error: {e}")
+            except Exception:
+                logger.warning('Failed to decrypt cached native CP-ABE key, regenerating.')
                 cached_key_data = None
         
+        if cached_key_data:
+            return cached_key_data
+        with tempfile.NamedTemporaryFile(delete=False) as key_file:
+            path = key_file.name
         try:
-            if not cached_key_data:
-                import tempfile
-                import os
-                # Generate key requires a file output due to C library constraints
-                with tempfile.NamedTemporaryFile(delete=False) as f_key:
-                    key_name = f_key.name
-                
-                try:
-                    cpabe_service.generate_user_key(user_attrs, key_name, scheme=abe_scheme, **crypto_options)
-                    # Read the generated key immediately and delete the file
-                    with open(key_name, 'rb') as f:
-                        cached_key_data = f.read()
-                    
-                    # Encrypt the generated key before caching
-                    encrypted_key_to_cache = encrypt_bytes(cached_key_data, info=cache_info, aad=cache_aad)
-                    # Cache the encrypted key for 1 hour
-                    cache.set(cache_key, encrypted_key_to_cache, timeout=3600)
-                finally:
-                    if os.path.exists(key_name):
-                        os.remove(key_name)
-                    
-            try:
-                # Decrypt passing the raw bytes directly (No TempFile)
-                from django.conf import settings
-                if crypto_metadata['pqc_signed']:
-                    decrypted_data = cpabe_service.decrypt_buffer_and_verify(
-                        cached_key_data, file_data, scheme=abe_scheme, **crypto_options,
-                    )
-                else:
-                    decrypted_data = cpabe_service.decrypt_buffer(
-                        cached_key_data, file_data, scheme=abe_scheme, **crypto_options,
-                    )
-                extra = {"user.name": user.username, "user.id": user.id} if user else {}
-                logger.info(f"CP-ABE Decryption successful for file: {file_path}", extra=extra)
-                # We DO NOT cache decrypted_data for security reasons.
-                # Decrypted data should strictly reside in RAM during the request life cycle.
-                if legacy_metadata:
-                    persist_verified_metadata(file_version, crypto_metadata)
-                return decrypted_data
-            except CPABEAccessDenied:
-                raise
-            except Exception as e:
-                error_msg = str(e)
-                extra = {"user.name": user.username, "user.id": user.id} if user else {}
-                logger.error(f"Decryption failed: {error_msg}", extra=extra)
-                if legacy_metadata:
-                    raise CryptoMetadataError('Historical crypto metadata could not be verified; recovery is required.')
-                # Otherwise (e.g. -4 Crypto failed), it is a real decryption failure
-                raise Exception("You don't have permission to see this file!")
-        except CPABEAccessDenied as exc:
-            raise PermissionDenied(str(exc)) from exc
-    
+            cpabe_service.generate_user_key(user_attrs, path, scheme=abe_scheme)
+            with open(path, 'rb') as key_file:
+                key = key_file.read()
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+        cache.set(cache_key, encrypt_bytes(key, info=cache_info, aad=cache_aad), timeout=3600)
+        return key
+
     def get_queryset(self):
         """Filter files by user, bucket, and ABAC policies"""
         from crypto_access.models.storage import UploadedFile, StorageBucket, FileAccessPolicy, FileVersion

@@ -99,6 +99,11 @@ if redis_url:
     redis_options = {
         'CLIENT_CLASS': 'django_redis.client.DefaultClient',
     }
+    if os.environ.get('VAULT_RUNTIME_ONLY', '').lower() == 'true' and (
+        not redis_url.startswith('rediss://') or not redis_use_tls or
+        not os.path.isfile(os.environ.get('REDIS_CACERT', ''))
+    ):
+        raise ValueError('Production Redis requires TLS with a configured CA certificate.')
     
     if redis_use_tls:
         # Require SSL/TLS for secure transit

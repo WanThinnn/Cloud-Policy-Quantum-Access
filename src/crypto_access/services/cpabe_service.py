@@ -34,12 +34,17 @@ COVERCRYPT_NATIVE_MSK_KEY = "CPABE_MSK_COVERCRYPT_NATIVE"
 COVERCRYPT_NATIVE_PQC_PK_KEY = "PQC_PK_COVERCRYPT_NATIVE"
 COVERCRYPT_NATIVE_PQC_SK_KEY = "PQC_SK_COVERCRYPT_NATIVE"
 _COVERCRYPT_ENV_LOCK = threading.RLock()
+VAULT_BUFFER_TIMEOUT = (5, 120)
 
 class CPABEError(Exception):
     pass
 
 
 class CPABEAccessDenied(CPABEError):
+    pass
+
+
+class CPABEVaultUnavailable(CPABEError):
     pass
 
 
@@ -606,9 +611,11 @@ class CPABEService:
             headers = {"X-Vault-Token": vault_service.get_token, "Content-Type": "application/json"}
             
             ac17_pk_b64 = vault_service.get_secret('CPABE_PK_AC17')
+            tkn20_pk_b64 = vault_service.get_secret('CPABE_PK_TKN20')
+            if getattr(vault_service, 'runtime_only', False) is True and not (ac17_pk_b64 and tkn20_pk_b64):
+                raise CPABEError('An operator must provision the AC17 and TKN20 public records.')
             if not ac17_pk_b64:
                 ac17_pk_b64 = self._ensure_classical_vault_keyset('ac17', headers, is_pqc_enabled)
-            tkn20_pk_b64 = vault_service.get_secret('CPABE_PK_TKN20')
             if not tkn20_pk_b64:
                 tkn20_pk_b64 = self._ensure_classical_vault_keyset('tkn20', headers, is_pqc_enabled)
             # Set self.pk_data to current scheme's PK just in case it's read by the frontend/API
@@ -832,38 +839,107 @@ class CPABEService:
                     
         return sorted(set(result))
         
-    def generate_user_key(self, user_attributes: dict, output_path: str, scheme: str = None, *, route=None):
-        """Generate a private key file for a user based on their attributes"""
+    def _vault_buffer_operation(self, mount, operation, payload, result_field, *, allow_empty=False):
+        headers = {"X-Vault-Token": vault_service.get_token}
+        try:
+            response = requests.put(
+                f"{vault_service.get_addr}/v1/{mount}/{operation}",
+                headers=headers, json=payload, verify=self._vault_verify, timeout=VAULT_BUFFER_TIMEOUT,
+            )
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if operation in ('decrypt', 'decrypt_with_attributes') and status == 400:
+                raise CPABEAccessDenied('Vault rejected decryption or signature verification.') from None
+            raise CPABEVaultUnavailable(f'Vault {operation} is unavailable.') from None
+        except requests.RequestException:
+            raise CPABEVaultUnavailable(f'Vault {operation} is unavailable.') from None
+
+        try:
+            encoded = response.json()['data'][result_field]
+            if not isinstance(encoded, str):
+                raise ValueError()
+            result = base64.b64decode(encoded, validate=True)
+            if not result and not allow_empty:
+                raise ValueError()
+            return result
+        except (KeyError, TypeError, ValueError):
+            raise CPABEVaultUnavailable(f'Vault {operation} returned an invalid result.') from None
+
+    def generate_user_key_bytes(self, user_attributes: dict, scheme: str = None, *, route=None) -> bytes:
+        """Return the Vault user key directly in memory for immediate use."""
+        if not self.use_vault_plugin:
+            raise CPABEError('In-memory key generation requires the Vault plugin.')
         if scheme is None:
             scheme = getattr(settings, 'CPABE_SCHEME', 'ac17')
         from .abe_schemes import validate_scheme
-        scheme = validate_scheme(scheme, backend='vault' if self.use_vault_plugin else 'native')
-            
-        headers = {"X-Vault-Token": vault_service.get_token, "Content-Type": "application/json"} if self.use_vault_plugin else None
-        if self.use_vault_plugin and scheme == 'covercrypt' and route is None:
+        scheme = validate_scheme(scheme, backend='vault')
+        if scheme == 'covercrypt' and route is None:
+            headers = {"X-Vault-Token": vault_service.get_token}
             route = self._ensure_covercrypt_keyset(False, headers, allow_setup=False, return_route=True)
         attr_strings = self.expand_hierarchical_attributes(
             user_attributes, scheme=scheme, configuration=route.configuration if route else None,
         )
-        attr_str = " ".join(attr_strings)
-        logger.info(f"Generating Private Key (Scheme: {scheme}) with attributes: {attr_str}")
-        
+        mount = route.mount if route else f'abe_{scheme}'
+        payload = {"scheme": scheme, "attributes": " ".join(attr_strings)}
+        return self._vault_buffer_operation(mount, 'genkey', payload, 'secret_key')
+
+    def decrypt_with_attributes(self, user_attributes, ciphertext, metadata, *, route=None):
+        """Use the published upstream one-call decrypt contract without receiving a user key."""
+        from .version_crypto import CryptoMetadataError, inspect_header, validate_metadata
+
+        metadata = validate_metadata(metadata)
+        scheme = metadata['scheme']
+        header = inspect_header(ciphertext)
+        if (not self.use_vault_plugin or metadata['backend'] != 'vault' or
+                any(header[field] != metadata[field] for field in ('scheme', 'format'))):
+            raise CryptoMetadataError('The ciphertext differs from its recorded Vault scheme or format.')
+        if route is None and (scheme == 'covercrypt' or metadata['schema'] != 2):
+            if scheme == 'covercrypt':
+                route = self.verify_version_authority(metadata)
+            else:
+                try:
+                    authority = self._read_vault_authority(scheme, {'X-Vault-Token': vault_service.get_token})
+                except requests.RequestException:
+                    raise CPABEVaultUnavailable('Vault authority is unavailable.') from None
+                if authority is None:
+                    raise CryptoMetadataError('The recorded Vault authority is unavailable.')
+
+        mount = route.mount if route else f'abe_{scheme}'
+        if metadata['schema'] == 2:
+            fingerprint, revision = metadata['keyset_id'], metadata['authority_revision']
+        else:
+            authority = route.authority if route else authority
+            fingerprint, revision = authority.fingerprint, authority.revision
+        attrs = self.expand_hierarchical_attributes(
+            user_attributes, scheme=scheme, configuration=route.configuration if route else None,
+        )
+        payload = {
+            'ciphertext': base64.b64encode(ciphertext).decode('ascii'),
+            'attributes': ' '.join(attrs),
+            'scheme': scheme,
+            'format': metadata['format'],
+            'keyset_id': fingerprint,
+            'authority_revision': str(revision),
+            'signature_mode': 'required' if metadata['pqc_signed'] else 'unsigned',
+        }
+        return self._vault_buffer_operation(mount, 'decrypt_with_attributes', payload, 'plaintext', allow_empty=True)
+
+    def generate_user_key(self, user_attributes: dict, output_path: str, scheme: str = None, *, route=None):
+        """Preserve the file-based interface for callers that require it."""
         if self.use_vault_plugin:
-            payload = {"scheme": scheme, "attributes": attr_str}
-            mount = route.mount if route else f'abe_{scheme}'
-            endpoint = f"/v1/{mount}/genkey"
-            try:
-                resp = requests.put(f"{vault_service.get_addr}{endpoint}", headers=headers, json=payload, verify=self._vault_verify)
-                resp.raise_for_status()
-                sk_b64 = resp.json()["data"]["secret_key"]
-                with open(output_path, 'wb') as f:
-                    f.write(base64.b64decode(sk_b64))
-                return
-            except Exception as e:
-                raise CPABEError(f"Vault ABE Plugin GenKey ({scheme}) failed: {e}")
+            key = self.generate_user_key_bytes(user_attributes, scheme, route=route)
+            with open(output_path, 'wb') as stream:
+                stream.write(key)
+            return
 
         if not self._lib:
             raise CPABEError("Library not loaded")
+
+        from .abe_schemes import validate_scheme
+        scheme = validate_scheme(scheme if scheme is not None else getattr(settings, 'CPABE_SCHEME', 'ac17'),
+                                 backend='native')
+        attr_str = " ".join(self.expand_hierarchical_attributes(user_attributes, scheme=scheme))
 
         if scheme == 'covercrypt':
             self._ensure_covercrypt_native_keyset()
@@ -1046,7 +1122,7 @@ class CPABEService:
         return data, metadata
 
     def verify_version_authority(self, metadata):
-        """Bind new Vault version metadata before a cached user key can be used."""
+        """Bind the recorded Vault identity before key generation or decryption."""
         from .version_crypto import CryptoMetadataError, validate_metadata
         from .covercrypt_config import AUTHORITY_HISTORY_KEY
         metadata = validate_metadata(metadata)
@@ -1071,13 +1147,18 @@ class CPABEService:
                 if metadata['pqc_signed'] and not route.authority.verifier:
                     raise CPABEError('The CoverCrypt authority has no verification key.')
                 return route
-            except (CPABEError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, requests.RequestException) as exc:
+            except requests.RequestException:
+                raise CPABEVaultUnavailable('Vault authority is unavailable.') from None
+            except (CPABEError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as exc:
                 raise CryptoMetadataError('The recorded CoverCrypt authority is unavailable or inconsistent.') from exc
         if metadata['schema'] != 2:
             return
         if not self.use_vault_plugin:
             raise CryptoMetadataError('This version requires its recorded Vault backend.')
-        authority = self._read_vault_authority(scheme, headers)
+        try:
+            authority = self._read_vault_authority(scheme, headers)
+        except requests.RequestException:
+            raise CPABEVaultUnavailable('Vault authority is unavailable.') from None
         if (authority is None or authority.fingerprint != metadata['keyset_id'] or
                 authority.revision != metadata['authority_revision']):
             raise CryptoMetadataError('The recorded authority/revision is unavailable; historical-key recovery is required.')
@@ -1149,16 +1230,7 @@ class CPABEService:
             if scheme == 'covercrypt' and route is None:
                 route = self._ensure_covercrypt_keyset(False, headers, allow_setup=False, return_route=True)
             mount = route.mount if route else f'abe_{scheme}'
-            try:
-                resp = requests.put(f"{vault_service.get_addr}/v1/{mount}/decrypt", headers=headers, json=payload, verify=self._vault_verify)
-                resp.raise_for_status()
-                return base64.b64decode(resp.json()["data"]["plaintext"])
-            except requests.HTTPError as e:
-                if scheme == 'covercrypt' and e.response.status_code in (400, 403):
-                    raise CPABEAccessDenied("CoverCrypt decryption was denied.") from e
-                raise CPABEError(f"Vault ABE Plugin decrypt ({scheme}) failed: {e}") from e
-            except Exception as e:
-                raise CPABEError(f"Vault ABE Plugin decrypt ({scheme}) failed: {e}")
+            return self._vault_buffer_operation(mount, 'decrypt', payload, 'plaintext', allow_empty=True)
 
         if not self._decrypt_buffer_func:
             raise CPABEError("Buffer decryption function not found in library")
@@ -1262,18 +1334,7 @@ class CPABEService:
                 "secret_key": base64.b64encode(sk_data).decode('utf-8'),
                 "pqc_public_key": pqc_pk_b64,
             }
-            try:
-                resp = requests.put(f"{vault_service.get_addr}/v1/{mount}/decrypt", headers=headers, json=payload, verify=self._vault_verify)
-                resp.raise_for_status()
-                return base64.b64decode(resp.json()["data"]["plaintext"])
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 400 or e.response.status_code == 403:
-                    if scheme == 'covercrypt':
-                        raise CPABEAccessDenied("CoverCrypt decryption or signature verification was denied.") from e
-                    raise CPABEError("Decryption failed or signature invalid (unauthorized)")
-                raise CPABEError(f"Vault ABE Plugin PQC decrypt ({scheme}) failed: {e}")
-            except Exception as e:
-                raise CPABEError(f"Vault ABE Plugin PQC decrypt ({scheme}) failed: {e}")
+            return self._vault_buffer_operation(mount, 'decrypt', payload, 'plaintext', allow_empty=True)
 
         if not getattr(self, '_decrypt_buffer_verify_func', None):
             raise CPABEError("PQC decryptBuffer_and_verify function not found in DLL")

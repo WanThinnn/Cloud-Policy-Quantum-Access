@@ -5,7 +5,6 @@ import urllib.request
 import urllib.error
 import argparse
 import ssl
-import urllib3
 
 # Install hvac if running outside container but we assume it's running inside `web` container
 try:
@@ -15,7 +14,6 @@ except ImportError:
     exit(1)
 
 # Suppress InsecureRequestWarning for self-signed Vault certs
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 VAULT_ADDR = os.environ.get('VAULT_ADDR', 'http://localhost:8200')
 VAULT_SECRET_PATH = os.environ.get('VAULT_SECRET_PATH', 'secret/data/crypto_access')
@@ -72,15 +70,12 @@ def wait_for_vault():
     ca_cert_path = get_ca_cert_path()
     if VAULT_ADDR.startswith('https') and ca_cert_path:
         ctx.load_verify_locations(cafile=ca_cert_path)
-    else:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
 
     for _ in range(30):
         try:
             req = urllib.request.Request(f"{VAULT_ADDR}/v1/sys/health")
             try:
-                with urllib.request.urlopen(req, context=ctx) as response:
+                with urllib.request.urlopen(req, context=ctx, timeout=5) as response:
                     if response.status in [200, 429, 472, 473, 501, 503]:
                         return True
             except urllib.error.HTTPError as e:
@@ -155,7 +150,7 @@ def register_abe_plugin(client):
             "command": "vault-plugin-abe"
         }
         url = f"{client.url}/v1/sys/plugins/catalog/secret/vault-plugin-abe"
-        response = requests.put(url, headers=headers, json=payload, verify=False)
+        response = requests.put(url, headers=headers, json=payload, verify=get_ca_cert_path() or True, timeout=30)
         response.raise_for_status()
     except Exception as e:
         if "already registered" not in str(e):
@@ -245,9 +240,7 @@ def init_and_unseal():
         if ca_cert_path:
             client = hvac.Client(url=VAULT_ADDR, verify=ca_cert_path)
         else:
-            # Running locally on Windows without the cert mounted, disable verification
-            client = hvac.Client(url=VAULT_ADDR, verify=False)
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            client = hvac.Client(url=VAULT_ADDR, verify=True)
     else:
         client = hvac.Client(url=VAULT_ADDR)
     
