@@ -13,8 +13,10 @@ for (const safari of [false, true]) {
     test(`${safari ? 'Safari' : 'Chromium'} Native Messaging only forwards validated requests`, () => {
         let listener;
         const messages = [];
+        const event = { addListener: callback => { listener = callback; } };
         const runtime = {
-            onMessageExternal: { addListener: callback => { listener = callback; } },
+            id: 'extension-under-test',
+            [safari ? 'onMessage' : 'onMessageExternal']: event,
             sendNativeMessage(host, message, reply) {
                 messages.push({ host, message });
                 reply({ ok: true });
@@ -22,7 +24,8 @@ for (const safari of [false, true]) {
         };
         runInNewContext(script, { origin, safari, URL, [safari ? 'browser' : 'chrome']: { runtime } });
         const sender = { url: origin + '/manage/keys/', frameId: 0 };
-        if (!safari) sender.origin = origin;
+        if (safari) sender.id = runtime.id;
+        else sender.origin = origin;
         const reject = () => assert.fail('An unauthorized sender must not receive a response');
         for (const invalid of [
             { ...sender, url: 'https://attacker.example' },
@@ -34,6 +37,7 @@ for (const safari of [false, true]) {
             assert.equal(listener(request, invalid, reject), false);
         }
         if (!safari) assert.equal(listener(request, { ...sender, origin: undefined }, reject), false);
+        if (safari) assert.equal(listener(request, { ...sender, id: 'another-extension' }, reject), false);
         const expectInvalid = response => assert.equal(response.code, 'invalid_request');
         listener({ ...request, protocol: 'invalid' }, sender, expectInvalid);
         listener({ ...request, command: { operation: 'sign_bytes' } }, sender, expectInvalid);

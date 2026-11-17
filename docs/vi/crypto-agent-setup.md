@@ -31,8 +31,12 @@ extension của thiết bị.
 
 ### Bật extension Safari trên macOS
 
-Với gói có Safari, setup cài ứng dụng vào `~/Applications`. Mở **Safari → Settings →
-Extensions**, bật **CPQA Crypto Agent**, cấp quyền cho trang CPQA rồi tải lại.
+Setup cài ứng dụng vào `~/Applications` và mở một lần. Nếu macOS yêu cầu
+phê duyệt, mở ứng dụng từ Finder và làm theo hộp thoại của hệ thống.
+Vào **Safari → Settings → Advanced**, bật **Show features for web developers**.
+Trong **Developer**, chọn **Allow unsigned extensions**. Trong **Extensions**,
+bật **CPQA Crypto Agent**, cấp quyền cho trang CPQA rồi tải lại. Gói Safari
+dùng chế độ thử cục bộ của Apple.
 
 Gói macOS và Linux hỗ trợ kiểm tra kết nối. Hai nền tảng này hiện từ chối đăng
 ký và ký native cho tới khi có cơ chế bảo vệ khóa và xác minh người dùng.
@@ -40,33 +44,16 @@ ký và ký native cho tới khi có cơ chế bảo vệ khóa và xác minh ng
 ## Phát hành bộ cài
 
 Chạy workflow thủ công **Build Crypto Agent installers** với HTTPS origin của
-CPQA, ID extension Chromium và **public key** DER Base64 tương ứng. Workflow
-tạo một ZIP trọn bộ và mục catalog cho mỗi nền tảng. Public key giúp extension
-đi kèm giữ nguyên ID dù thư mục cài trên mỗi máy khác nhau. Có thể thêm ID
-Edge Add-ons nếu đã phát hành extension riêng qua store.
-
-Workflow mặc định build ZIP Chromium cho Windows, Linux, Mac Intel và Apple
-silicon. Luồng này không cần tài khoản Apple Developer.
-
-Truyền `safari_bundle_id` để thêm Safari vào gói macOS đã qua notarization.
-Các job này dùng GitHub environment `crypto-agent-macos`. Đặt biến
-`APPLE_TEAM_ID` và các secret sau trong environment đó. Giới hạn environment
-vào các nhánh hoặc tag tin cậy.
-
-| Secret | Giá trị |
-| --- | --- |
-| `APPLE_DEVELOPER_ID_P12_BASE64` | Tệp PKCS#12 Developer ID Application có khóa ký, mã hóa Base64 |
-| `APPLE_DEVELOPER_ID_P12_PASSWORD` | Mật khẩu của tệp PKCS#12 |
-| `APPLE_NOTARY_KEY_P8_BASE64` | Tệp API key của team App Store Connect dùng cho notarization, mã hóa Base64 |
-| `APPLE_NOTARY_KEY_ID` | ID của API key dùng cho notarization |
-| `APPLE_NOTARY_ISSUER_ID` | Issuer ID của API key dùng cho notarization |
+CPQA. Workflow tạo một ZIP trọn bộ và mục catalog cho Windows x64, Linux x64,
+Mac Intel và Apple silicon. ZIP Mac có Safari và Chromium. Không cần tài
+khoản Apple hoặc ID extension. Build suy ra ID Chromium ổn định từ public key
+đi kèm mã nguồn.
 
 Sau khi workflow có trên GitHub, chạy từ CLI trên máy local. Đặt các biến shell
-theo origin CPQA, ID và public key của extension Chromium. Để thêm Safari,
-truyền thêm `-f "safari_bundle_id=$macBundleId"`.
+theo nhánh build và origin CPQA.
 
 ```powershell
-rtk gh workflow run crypto-agent.yml --ref $releaseBranch -f "origin=$cpqaOrigin" -f "chrome_id=$chromeExtensionId" -f "extension_key=$chromeExtensionPublicKey"
+rtk gh workflow run crypto-agent.yml --ref $releaseBranch -f "origin=$cpqaOrigin"
 rtk gh run list --workflow crypto-agent.yml
 rtk gh run watch $runId --exit-status
 rtk gh run download $runId --pattern 'crypto-agent-*' --dir agent-artifacts
@@ -79,10 +66,10 @@ tag trên mọi runner. Khi build từ mã nguồn upstream tại máy local, d�
 của thư viện.
 
 Để build pilot Windows ở local, chạy trong x64 Visual Studio developer shell
-có Python và Rust. Thay ID minh họa bằng ID extension triển khai thực tế.
+có Python và Rust.
 
 ```powershell
-rtk python src/crypto_agent/package_agent.py --origin $cpqaOrigin --extension-id $chromeExtensionId --extension-key $chromeExtensionPublicKey --ref v6.0.0 --output-dir src/crypto_agent/target/distribution
+rtk python src/crypto_agent/package_agent.py --origin $cpqaOrigin --ref v6.0.0 --output-dir src/crypto_agent/target/distribution
 ```
 
 Với một nền tảng, chép bộ cài và `manifest.json` vào `config/crypto-agent/`
@@ -92,11 +79,8 @@ version lên trước, sau đó thay catalog. Compose mặc định cho Django �
 mục này tại `/config/crypto-agent`. Chỉ cấp quyền ghi cho operator phát hành.
 
 Trong môi trường deploy, đặt `CRYPTO_AGENT_ORIGIN` trùng với origin lúc đóng
-gói. CPQA đọc ID extension từ catalog đã phát hành. Các biến
-`CRYPTO_AGENT_CHROME_EXTENSION_ID` và `CRYPTO_AGENT_SAFARI_EXTENSION_ID`
-được ưu tiên nếu đã cấu hình. Nếu có extension riêng trên Edge Add-ons,
-đặt thêm `CRYPTO_AGENT_EDGE_EXTENSION_ID`. Giữ một ID Chromium chung cho
-các gói trong catalog. Đặt `CRYPTO_AGENT_MIN_VERSION` là version
+gói. CPQA đọc ID Chromium và trạng thái có Safari từ catalog đã phát hành.
+Đặt `CRYPTO_AGENT_MIN_VERSION` là version
 tối thiểu tương thích. Áp dụng Django migration, tạo lại container web với
 `NATIVE_SIGNING_ENABLED=true` và kiểm tra luồng setup bằng tài khoản pilot.
 Giữ `NATIVE_SIGNING_REQUIRED=false` cho đến khi đã kiểm tra phân phối và
@@ -117,23 +101,20 @@ Khi ký bắt buộc đang tắt, tài khoản chưa đăng ký agent trên hồ
 này tiếp tục dùng luồng ký hiện tại. Sau khi đăng ký, upload trong hồ sơ đó
 sử dụng Crypto Agent.
 
-Môi trường local `https://cloudsafe.cyberfortress.local` dùng gói Windows x64
-từ upstream release `v6.0.0`. ID Edge pilot và public key DER của extension
-được lưu trong `config/crypto-agent/pilot-extension-identity.json` trên máy
-dev. Khi build lại, giữ nguyên hai giá trị để Edge và Django tiếp tục nhận
-đúng extension. Chạy từ x64 Visual Studio developer shell tại root repo.
+Môi trường local `https://cloudsafe.cyberfortress.local` dùng upstream release
+`v6.0.0`. Build tự dùng lại ID Chromium của bản pilot Windows. Chạy từ x64
+Visual Studio developer shell tại root repo.
 
 ```powershell
-$identity = Get-Content -Raw config/crypto-agent/pilot-extension-identity.json | ConvertFrom-Json
-rtk python src/crypto_agent/package_agent.py --origin https://cloudsafe.cyberfortress.local --extension-id $identity.id --extension-key $identity.key --ref v6.0.0 --output-dir src/crypto_agent/target/windows-pilot-next
+rtk python src/crypto_agent/package_agent.py --origin https://cloudsafe.cyberfortress.local --ref v6.0.0 --output-dir src/crypto_agent/target/windows-pilot-next
 ```
 
 Sau khi chép gói mới cùng catalog vào `config/crypto-agent/`, có thể nạp lại
 biến môi trường local bằng `rtk docker compose --project-directory . -f
 docker/docker-compose.yml up -d --no-deps --force-recreate web`.
 
-Áp dụng quy trình ký và phân phối phần mềm của doanh nghiệp. Với gói macOS có
-Safari, Apple Developer ID và notarization xác thực bộ cài. Chữ ký
+Áp dụng quy trình ký và phân phối phần mềm của doanh nghiệp. Gói macOS dùng
+chữ ký ad hoc cho thử nghiệm cục bộ. Chữ ký
 tài liệu dùng ML-DSA-87 của upstream. Bản pilot Windows dùng AES-256-GCM để
 bảo vệ private key. Yêu cầu ký có thời hạn và ràng
 buộc hash của file upload với thiết bị đã đăng ký. Thiết bị lưu khóa ML-DSA
@@ -147,4 +128,4 @@ minh người dùng. Khóa bọc hiện dùng kho credential của hệ điều 
 
 [Chrome Native Messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
 · [Microsoft Edge Native Messaging](https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging)
-· [Phân phối Safari Web Extension](https://developer.apple.com/documentation/safariservices/distributing-your-safari-web-extension)
+· [Thử nghiệm Safari Web Extension cục bộ](https://developer.apple.com/documentation/safariservices/building-and-testing-a-safari-web-extension)

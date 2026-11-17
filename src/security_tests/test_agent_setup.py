@@ -20,12 +20,22 @@ from crypto_access.services import agent_packages, native_signing
 class CryptoAgentDownloadTests(SimpleTestCase):
     @override_settings(NATIVE_SIGNING_ENABLED=True, CRYPTO_AGENT_CHROME_EXTENSION_ID='',
                        CRYPTO_AGENT_EDGE_EXTENSION_ID='', CRYPTO_AGENT_MIN_VERSION='0.2.0')
-    def test_safari_extension_identity_requires_an_apple_bundle_and_team(self):
+    def test_safari_is_enabled_by_the_published_macos_package(self):
         user = SimpleNamespace(is_authenticated=True, pk=1)
-        valid = 'example.cpqa.Safari.Extension (ABCDE12345)'
-        for identity, expected in [(valid, valid), ('example.cpqa.Safari.Extension', ''), ('https://x.test', '')]:
-            with self.subTest(identity=identity), override_settings(CRYPTO_AGENT_SAFARI_EXTENSION_ID=identity):
-                self.assertEqual(agent_packages.public_config(user)['safariExtensionId'], expected)
+        with TemporaryDirectory() as directory, override_settings(CRYPTO_AGENT_PACKAGE_DIR=directory):
+            root = Path(directory)
+            version = '0.3.1'
+            for target, bundled, enabled in [('windows-x86_64', True, False), ('macos-arm64', 'true', False),
+                                              ('macos-arm64', True, True)]:
+                with self.subTest(target=target, bundled=bundled):
+                    name = f'cpqa-crypto-agent-{target}-{version}.zip'
+                    (root / name).write_bytes(b'installer')
+                    manifest = {'revision': 1, 'packages': [{
+                        'target': target, 'version': version, 'filename': name, 'sha256': 'a' * 64,
+                        'safari_bundled': bundled,
+                    }]}
+                    (root / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+                    self.assertEqual(agent_packages.public_config(user)['safariBundled'], enabled)
 
     def test_only_authenticated_users_can_download_a_valid_published_installer(self):
         factory = RequestFactory()

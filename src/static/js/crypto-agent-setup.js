@@ -41,7 +41,7 @@
             enrollment_required: `Crypto Agent ${version} is connected. Register this device to sign.`,
             extension_unconfigured: 'Your administrator has not configured the Crypto Agent browser extension.',
             extension_unreachable: agent.isSafari
-                ? 'Install the macOS package, enable CPQA in Safari Settings → Extensions, and allow it on this site.'
+                ? 'Install the macOS package. In Safari, allow unsigned extensions, enable CPQA, and allow access to this site.'
                 : bundledSetup
                     ? 'Run setup from the ZIP and load the installed extension folder in your Chromium browser.'
                     : 'Install or enable the CPQA extension in your Chromium browser, then check again.',

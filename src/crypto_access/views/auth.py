@@ -83,7 +83,7 @@ def manage_keys_page(request):
                 'sha256': package['sha256'],
                 'install_command': package.get('install_command'),
                 'setup_script': package.get('setup_script'),
-                'safari_bundled': bool(package.get('safari_extension_id')),
+                'safari_bundled': package.get('safari_bundled', False),
                 'target': target,
                 'is_macos': target.startswith('macos-'),
                 'url': reverse('crypto_agent_download', args=[target]),

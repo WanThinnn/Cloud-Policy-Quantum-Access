@@ -10,6 +10,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
+from uuid import uuid4
+from urllib.parse import urlsplit
 from zipfile import ZipFile
 
 from prepare_upstream import LIBRARY, ROOT, sha256
@@ -25,19 +28,21 @@ def call(exe, caller, message):
     return json.loads(result.stdout[4:])
 
 
-def main(folder):
+def main(folder, expected_target=None):
     manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
     entry, = manifest["packages"]
+    if expected_target:
+        assert entry["target"] == expected_target
     artifact = folder / entry["filename"]
     assert sha256(artifact) == entry["sha256"]
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         system = entry["target"].split("-")[0]
-        if system == "macos" and entry.get("safari_extension_id"):
+        if system == "macos":
+            assert entry["safari_bundled"] is True
             subprocess.run(["ditto", "-x", "-k", str(artifact), str(root)], check=True)
             app, = root.glob("*.app")
             subprocess.run(["codesign", "--verify", "--strict", "--deep", str(app)], check=True)
-            subprocess.run(["xcrun", "stapler", "validate", str(app)], check=True)
             contents = app / "Contents"
             exe = contents / "Helpers" / "cpqa-crypto-agent"
             config_path = contents / "Resources" / "crypto-agent.json"
@@ -92,6 +97,14 @@ def check_safari(extension, upstream, version):
     contents = extension / "Contents"
     config_path = contents / "Resources" / "crypto-agent.json"
     origin = json.loads(config_path.read_text(encoding="utf-8"))["origin"]
+    manifest = json.loads((config_path.parent / "manifest.json").read_text(encoding="utf-8"))
+    relay, = manifest["content_scripts"]
+    assert relay["matches"] == [f"https://{urlsplit(origin).hostname}/*"]
+    assert relay["all_frames"] is False
+    assert "externally_connectable" not in manifest
+    assert (config_path.parent / relay["js"][0]).read_text(encoding="utf-8").startswith(
+        f"const cpqaSafariOrigin = {json.dumps(origin)};\n",
+    )
     bridge = ctypes.CDLL(str(contents / "Frameworks" / "libcpqa_crypto_agent.dylib"))
     handle = bridge.cpqa_safari_handle_request
     handle.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_char_p]
@@ -116,7 +129,14 @@ def check_safari(extension, upstream, version):
     assert capabilities["verification_error"] == "os_verification_unsupported"
     assert request({**message, "origin": "https://wrong-origin.invalid"})["code"] == "unsupported_protocol_or_origin"
     assert request({**message, "command": {"operation": "sign_bytes"}})["code"] == "invalid_request"
+    intent = json.dumps({
+        "protocol": "cpqa-signing-intent/v2", "origin": origin, "operation": "enroll_signing_key",
+        "request_id": str(uuid4()), "user_id": 1, "device_id": str(uuid4()), "expires_at": int(time.time()) + 60,
+    })
+    assert request({**message, "command": {"operation": "enroll_signing_key", "payload": intent}})["code"] == (
+        "os_verification_unsupported"
+    )
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    main(Path(sys.argv[1]), *sys.argv[2:])

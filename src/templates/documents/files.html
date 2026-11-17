@@ -828,7 +828,7 @@
 <script>window.MAX_UPLOAD_SIZE_MB = {{ upload_max_size_mb|default:10 }};</script>
 {% if crypto_agent %}
 {{ crypto_agent|json_script:"crypto-agent-config" }}
-<script src="{% static 'js/crypto-agent.js' %}?v=6"></script>
+<script src="{% static 'js/crypto-agent.js' %}?v=7"></script>
 {% endif %}
 <script src="{% static 'js/files-manager.js' %}?v=44"></script>
 <!-- Hidden form for version upload -->

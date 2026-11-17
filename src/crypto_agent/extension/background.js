@@ -22,8 +22,10 @@ function validCommand(command) {
     }
 }
 
-runtime.onMessageExternal.addListener((message, sender, reply) => {
+const requests = safari ? runtime.onMessage : runtime.onMessageExternal;
+requests.addListener((message, sender, reply) => {
     if (!sender.url || sender.frameId !== 0) return false;
+    if (safari && sender.id !== runtime.id) return false;
     if ((!safari || sender.origin !== undefined) && sender.origin !== origin) return false;
     try {
         if (new URL(sender.url).origin !== origin) return false;

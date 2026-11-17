@@ -8,10 +8,9 @@
         && navigator.vendor === 'Apple Computer, Inc.' && navigator.maxTouchPoints < 2;
     const isEdge = (navigator.userAgentData?.brands || []).some(({ brand }) => brand === 'Microsoft Edge')
         || /\bEdg\//.test(navigator.userAgent);
-    const extensionIds = [...new Set((isSafari ? [config.safariExtensionId]
-        : [isEdge && config.edgeExtensionId, config.chromeExtensionId]).filter(Boolean))];
+    const extensionIds = [...new Set([isEdge && config.edgeExtensionId, config.chromeExtensionId].filter(Boolean))];
     let connectedExtension;
-    const runtime = isSafari ? window.browser?.runtime : window.chrome?.runtime;
+    const runtime = window.chrome?.runtime;
     const extensionUrl = !isSafari && extensionIds[0] && (isEdge && config.edgeExtensionId
         ? `https://microsoftedge.microsoft.com/addons/detail/${extensionIds[0]}`
         : `https://chromewebstore.google.com/detail/${extensionIds[0]}`);
@@ -30,40 +29,53 @@
             os_verification_unavailable: 'System verification is unavailable. Check the Crypto Agent setup for this operating system.',
             os_verification_busy: 'Close any other verification prompt and try again.',
             os_verification_browser_focus: 'Bring this browser window to the front and try again.',
-            os_verification_unsupported: 'This platform does not yet support the required system verification.',
+            os_verification_unsupported: 'Crypto Agent is connected. Native signing is unavailable on this platform.',
             signing_intent_expired: 'The request expired. Start again to get a new verification prompt.',
             agent_timeout: 'Crypto Agent timed out. Close any pending verification prompt and try again.',
         }[code];
     }
 
     function send(extensionId, command) {
-        if (!runtime?.sendMessage) return Promise.reject(new AgentError('extension_unreachable'));
+        if (isSafari ? (!window.isSecureContext || window.top !== window) : !runtime?.sendMessage) {
+            return Promise.reject(new AgentError('extension_unreachable'));
+        }
         return new Promise((resolve, reject) => {
             const interactive = ['enroll_signing_key', 'sign_document'].includes(command.operation);
             const probe = command.operation === 'probe_extension';
             const timeout = interactive ? 125000 : probe ? 5000 : 45000;
-            const timer = setTimeout(() => reject(new AgentError(probe ? 'extension_unreachable' : 'agent_timeout')), timeout);
-            try {
-                runtime.sendMessage(extensionId, { protocol, command }, response => {
-                    clearTimeout(timer);
-                    if (runtime.lastError || !response) {
-                        reject(new AgentError('extension_unreachable'));
-                    } else if (!response.ok) {
-                        reject(new AgentError(response.code));
-                    } else {
-                        resolve(response.result);
-                    }
-                });
-            } catch {
+            const channel = isSafari ? new MessageChannel() : null;
+            const timer = setTimeout(() => {
+                channel?.port1.close();
+                reject(new AgentError(probe ? 'extension_unreachable' : 'agent_timeout'));
+            }, timeout);
+            function reply(response) {
                 clearTimeout(timer);
-                reject(new AgentError('extension_unreachable'));
+                channel?.port1.close();
+                if (!response) reject(new AgentError('extension_unreachable'));
+                else if (!response.ok) reject(new AgentError(response.code));
+                else resolve(response.result);
+            }
+            try {
+                if (channel) {
+                    channel.port1.onmessage = event => reply(event.data);
+                    window.postMessage({ channel: 'cpqa-safari-agent', protocol, command },
+                        window.location.origin, [channel.port2]);
+                } else {
+                    runtime.sendMessage(extensionId, { protocol, command }, response => {
+                        reply(runtime.lastError ? null : response);
+                    });
+                }
+            } catch {
+                channel?.port2.close();
+                reply(null);
             }
         });
     }
 
     async function connectExtension() {
-        if (!extensionIds.length) throw new AgentError('extension_unconfigured');
-        for (const extensionId of extensionIds) {
+        const candidates = isSafari ? (config.safariBundled ? [null] : []) : extensionIds;
+        if (!candidates.length) throw new AgentError('extension_unconfigured');
+        for (const extensionId of candidates) {
             try {
                 const extension = await send(extensionId, { operation: 'probe_extension' });
                 if (extension?.protocol !== protocol) throw new AgentError('extension_outdated');
@@ -76,7 +88,7 @@
     }
 
     async function call(command) {
-        connectedExtension ??= await connectExtension();
+        if (connectedExtension === undefined) connectedExtension = await connectExtension();
         return send(connectedExtension, command);
     }
 

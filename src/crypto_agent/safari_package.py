@@ -1,10 +1,7 @@
-"""Build the signed macOS app that contains Safari and Chromium entry points."""
+"""Build the local-use macOS app with Safari and Chromium entry points."""
 
-import json
-import os
 from pathlib import Path
 import plistlib
-import re
 import shutil
 import subprocess
 
@@ -12,8 +9,7 @@ from prepare_upstream import ROOT, TARGETS
 
 
 APP_NAME = "CPQA Crypto Agent"
-BUNDLE_ID = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
-TEAM_ID = re.compile(r"[A-Z0-9]{10}")
+BUNDLE_ID = "com.cpqa.crypto-agent"
 
 
 def run(*args, **kwargs):
@@ -27,31 +23,20 @@ def one_match(directory, pattern):
     return matches[0]
 
 
-def code_signer(identity, team):
-    keychain = os.environ.get("CPQA_CODESIGN_KEYCHAIN")
-
-    def sign(path, entitlements=None):
-        command = ["codesign", "--force", "--sign", identity, "--timestamp", "--options", "runtime"]
-        if keychain:
-            command.extend(["--keychain", keychain])
-        if entitlements:
-            command.extend(["--entitlements", entitlements])
-        run(*command, path)
-        display = run("codesign", "-dv", "--verbose=4", path, capture_output=True, text=True).stderr
-        if (f"TeamIdentifier={team}" not in display.splitlines()
-                or not any(line.startswith("Authority=Developer ID Application: ") for line in display.splitlines())):
-            raise ValueError("The macOS signature does not belong to the requested Developer ID team.")
-
-    return sign
+def sign_locally(path, entitlements=None):
+    command = ["codesign", "--force", "--sign", "-"]
+    if entitlements:
+        command.extend(["--entitlements", entitlements])
+    run(*command, path)
 
 
-def build_safari_app(work, bundle, javascript, target, config, args):
+def build_safari_app(work, bundle, javascript, target, config):
     tool = "safari-web-extension-packager"
     if subprocess.run(["xcrun", "--find", tool], capture_output=True).returncode:
         tool = "safari-web-extension-converter"
     project_root = work / "xcode"
     run("xcrun", tool, javascript, "--project-location", project_root, "--app-name", APP_NAME,
-        "--bundle-identifier", args.safari_bundle_id, "--macos-only", "--objc", "--copy-resources",
+        "--bundle-identifier", BUNDLE_ID, "--macos-only", "--objc", "--copy-resources",
         "--no-open", "--no-prompt")
     project = one_match(project_root, "**/*.xcodeproj")
     handler = one_match(project_root, "**/SafariWebExtensionHandler.m")
@@ -69,14 +54,12 @@ def build_safari_app(work, bundle, javascript, target, config, args):
     extension = one_match(app_contents / "PlugIns", "*.appex")
     extension_contents = extension / "Contents"
     descriptor = plistlib.loads((extension_contents / "Info.plist").read_bytes())
-    extension_id = descriptor["CFBundleIdentifier"]
-    if not extension_id.startswith(f"{args.safari_bundle_id}.") or not BUNDLE_ID.fullmatch(extension_id):
-        raise ValueError("Unexpected Safari extension bundle identifier.")
+    if descriptor["NSExtension"]["NSExtensionPointIdentifier"] != "com.apple.Safari.web-extension":
+        raise ValueError("The macOS app does not contain a Safari Web Extension.")
     installed_config = bundle / "runtime" / "crypto-agent.json"
     shutil.copy2(installed_config, extension_contents / "Resources" / installed_config.name)
 
-    # Both signed Mac entry points use the same upstream binary. Keep the release
-    # provenance with it before applying Apple's required distribution signature.
+    # Both Mac entry points use the same upstream binary and release provenance.
     upstream = bundle / "runtime"
     app_frameworks = app_contents / "Frameworks"
     app_frameworks.mkdir(exist_ok=True)
@@ -97,33 +80,16 @@ def build_safari_app(work, bundle, javascript, target, config, args):
     for item in (*libraries, bridge, executable):
         run("lipo", "-verify_arch", target[1], item)
 
-    # Keep the Safari extension sandbox while allowing the shared Rust code to
-    # load the signed, same-team libraries. No Hardened Runtime exceptions.
+    # Use Apple's Sign to Run Locally equivalent and keep the extension sandbox.
     sandbox = work / "sandbox.plist"
     sandbox.write_bytes(plistlib.dumps({"com.apple.security.app-sandbox": True}))
-    sign = code_signer(args.macos_signing_identity, args.apple_team_id)
     for item in (*libraries, bridge, executable):
-        sign(item)
-    sign(extension, sandbox)
-    sign(app, sandbox)
-    run("codesign", "--verify", "--deep", "--strict", app)
-
-    archive = work / "macos-notarization.zip"
-    run("ditto", "-c", "-k", "--keepParent", app, archive)
-    submit = ["xcrun", "notarytool", "submit", archive, "--keychain-profile", args.notary_profile,
-              "--wait", "--output-format", "json"]
-    if keychain := os.environ.get("CPQA_CODESIGN_KEYCHAIN"):
-        submit.extend(["--keychain", keychain])
-    result = run(*submit, capture_output=True, text=True)
-    decision = json.loads(result.stdout)
-    if decision.get("status") != "Accepted":
-        raise ValueError(f"Apple did not accept the macOS notarization (submission {decision.get('id')}).")
-    run("xcrun", "stapler", "staple", app)
-    run("xcrun", "stapler", "validate", app)
+        sign_locally(item)
+    sign_locally(extension, sandbox)
+    sign_locally(app, sandbox)
     run("codesign", "--verify", "--deep", "--strict", app)
     shutil.move(app, bundle / f"{APP_NAME}.app")
     # Preserve all upstream licenses and notices alongside the app.
     for name in (*TARGETS[target][1], "cpqa-crypto-agent", "crypto-agent.json"):
         (upstream / name).unlink()
     (bundle / "native-host.json").unlink()
-    return f"{extension_id} ({args.apple_team_id})"

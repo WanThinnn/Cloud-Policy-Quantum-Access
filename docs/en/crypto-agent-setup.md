@@ -34,10 +34,12 @@ browser policies.
 
 ### Enable the Safari extension on macOS
 
-For a package built with Safari support, setup copies the app into
-`~/Applications`. In **Safari → Settings →
-Extensions**, enable **CPQA Crypto Agent**, grant it access to the CPQA
-site, and reload the page.
+Setup copies the app into `~/Applications` and opens it once. If macOS asks
+you to approve the app, open it from Finder and follow the system prompt.
+In **Safari → Settings → Advanced**, enable **Show features for web developers**.
+In **Developer** settings, select **Allow unsigned extensions**. Under
+**Extensions**, enable **CPQA Crypto Agent**, grant it access to the CPQA site,
+and reload the page. The Safari package uses Apple's local testing mode.
 
 The macOS and Linux packages support the connection check. Enrollment and
 signing require platform key protection and user verification and currently
@@ -46,35 +48,16 @@ return a verification error on these platforms.
 ## Publish installers
 
 Run the manual **Build Crypto Agent installers** workflow with the CPQA HTTPS
-origin, the Chromium extension ID, and its matching Base64 DER **public** key.
-The workflow produces an all-in-one installer ZIP and a catalog entry for each
-platform. The public key gives the bundled Chromium extension the same ID in
-all local installation folders. An optional Edge Add-ons ID can also be
-allowed for previously published extensions.
-
-The default build includes Chromium ZIPs for Windows, Linux, Mac Intel and
-Apple silicon. It requires no Apple Developer account.
-
-Pass `safari_bundle_id` to include Safari in the notarized macOS app. These
-jobs use the `crypto-agent-macos` GitHub environment. Set the `APPLE_TEAM_ID`
-variable and the following secrets there. Limit that environment to branches
-or tags you trust to build and sign.
-
-| Secret | Value |
-| --- | --- |
-| `APPLE_DEVELOPER_ID_P12_BASE64` | Base64-encoded Developer ID Application PKCS#12 with the signing key |
-| `APPLE_DEVELOPER_ID_P12_PASSWORD` | Password for the PKCS#12 file |
-| `APPLE_NOTARY_KEY_P8_BASE64` | Base64-encoded App Store Connect team API key file for notarization |
-| `APPLE_NOTARY_KEY_ID` | ID of the notarization API key |
-| `APPLE_NOTARY_ISSUER_ID` | Issuer ID of the notarization API key |
+origin. It produces a complete installer ZIP and catalog entry for Windows
+x64, Linux x64, Mac Intel, and Apple silicon. The Mac ZIP includes Safari and
+Chromium. No Apple account or extension ID is needed. The build derives the
+stable Chromium extension ID from the public key bundled with the source.
 
 After the workflow changes are on GitHub, dispatch it from the local CLI.
-Set the shell variables for the deployment origin, Chromium extension ID, and
-extension public key. To include Safari, add
-`-f "safari_bundle_id=$macBundleId"`.
+Set the shell variables for the branch and deployment origin.
 
 ```powershell
-rtk gh workflow run crypto-agent.yml --ref $releaseBranch -f "origin=$cpqaOrigin" -f "chrome_id=$chromeExtensionId" -f "extension_key=$chromeExtensionPublicKey"
+rtk gh workflow run crypto-agent.yml --ref $releaseBranch -f "origin=$cpqaOrigin"
 rtk gh run list --workflow crypto-agent.yml
 rtk gh run watch $runId --exit-status
 rtk gh run download $runId --pattern 'crypto-agent-*' --dir agent-artifacts
@@ -86,10 +69,10 @@ tag on all runners. For a local upstream source build, use `package_agent.py`
 with `--source source --ref` and the upstream build dependencies.
 
 For a local Windows pilot, run in an x64 Visual Studio developer shell with
-Python and Rust available. Use your deployed extension ID in the command.
+Python and Rust available.
 
 ```powershell
-rtk python src/crypto_agent/package_agent.py --origin $cpqaOrigin --extension-id $chromeExtensionId --extension-key $chromeExtensionPublicKey --ref v6.0.0 --output-dir src/crypto_agent/target/distribution
+rtk python src/crypto_agent/package_agent.py --origin $cpqaOrigin --ref v6.0.0 --output-dir src/crypto_agent/target/distribution
 ```
 
 For a single platform, copy the installer and its `manifest.json` to
@@ -100,11 +83,8 @@ place. The default Compose configuration makes that directory visible to Django
 as `/config/crypto-agent`. Keep it writable only by the release operator.
 
 In the deployment environment set `CRYPTO_AGENT_ORIGIN` to the exact origin used
-for packaging. CPQA reads browser extension IDs from the published catalog.
-Existing `CRYPTO_AGENT_CHROME_EXTENSION_ID` and
-`CRYPTO_AGENT_SAFARI_EXTENSION_ID` settings take precedence when set. If you
-publish a separate Edge Add-ons extension, set `CRYPTO_AGENT_EDGE_EXTENSION_ID`.
-Keep a single Chromium extension ID across packages in the catalog. Set
+for packaging. CPQA reads the Chromium extension ID and Safari availability
+from the published catalog. Set
 `CRYPTO_AGENT_MIN_VERSION` to the minimum
 compatible agent version. Apply the Django migrations, recreate the web
 container with `NATIVE_SIGNING_ENABLED=true`, and verify setup with a pilot user.
@@ -125,25 +105,21 @@ paths have been verified for users.
 While native signing is optional, a profile with no registered device uses the
 existing signing flow. Uploads in a registered profile use Crypto Agent.
 
-The local deployment at `https://cloudsafe.cyberfortress.local` uses the Windows
-x64 bundle with upstream release `v6.0.0`. The pilot Edge extension ID and its
-public DER key are recorded in `config/crypto-agent/pilot-extension-identity.json`
-on the development machine. Reuse both values when rebuilding to preserve the
-extension identity in Edge and Django. Run from an x64 Visual Studio developer
-shell at the repository root.
+The local deployment at `https://cloudsafe.cyberfortress.local` uses upstream
+release `v6.0.0`. The build uses the same Chromium extension ID as the Windows
+pilot. Run from an x64 Visual Studio developer shell at the repository root.
 
 ```powershell
-$identity = Get-Content -Raw config/crypto-agent/pilot-extension-identity.json | ConvertFrom-Json
-rtk python src/crypto_agent/package_agent.py --origin https://cloudsafe.cyberfortress.local --extension-id $identity.id --extension-key $identity.key --ref v6.0.0 --output-dir src/crypto_agent/target/windows-pilot-next
+rtk python src/crypto_agent/package_agent.py --origin https://cloudsafe.cyberfortress.local --ref v6.0.0 --output-dir src/crypto_agent/target/windows-pilot-next
 ```
 
 After copying the new installer and catalog to `config/crypto-agent/`, reload
 the local environment with `rtk docker compose --project-directory . -f
 docker/docker-compose.yml up -d --no-deps --force-recreate web`.
 
-Use your organization's release signing and distribution process. For macOS
-distribution with Safari, Apple Developer ID and notarization authenticate
-the bundle. Document signing uses upstream ML-DSA-87, with AES-256-GCM
+Use your organization's release signing and distribution process. The
+macOS ZIP uses ad hoc code signing for local testing. Document signing
+uses upstream ML-DSA-87, with AES-256-GCM
 protecting the device private key in the Windows pilot. Expiring signing requests
 bind the upload digest to an enrolled device. The device keeps the ML-DSA key
 encrypted locally, with the wrapping key in the OS credential store. Starting
@@ -156,4 +132,4 @@ and Windows Hello verifies the user.
 
 [Chrome Native Messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
 · [Microsoft Edge Native Messaging](https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging)
-· [Safari Web Extension distribution](https://developer.apple.com/documentation/safariservices/distributing-your-safari-web-extension)
+· [Safari Web Extension local testing](https://developer.apple.com/documentation/safariservices/building-and-testing-a-safari-web-extension)

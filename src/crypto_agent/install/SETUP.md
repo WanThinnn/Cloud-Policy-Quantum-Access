@@ -25,7 +25,11 @@ a different native host location or restrict access to desktop native hosts.
 
 ## Safari on macOS
 
-Use these steps if your Mac package includes Safari support.
+1. Open **Safari → Settings → Advanced** and turn on **Show features for web developers**.
+2. In **Developer** settings, select **Allow unsigned extensions**.
+3. Under **Extensions**, enable **CPQA Crypto Agent** and allow access to your CPQA site.
+4. Reload CPQA and choose **Check Crypto Agent**.
 
-Open **Safari → Settings → Extensions**, enable **CPQA Crypto Agent**, and
-allow it to access your CPQA site. Reload the CPQA tab.
+Setup opens the installed app once to register the extension. If macOS asks you
+to approve the app, open it from `~/Applications` and follow the system prompt.
+Use this Safari package for local testing.

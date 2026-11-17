@@ -14,14 +14,7 @@ TARGETS = {
 }
 INSTALLERS = {'windows': 'msi', 'linux': 'deb', 'macos': 'pkg'}
 VERSION = re.compile(r'[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}')
-SAFARI_EXTENSION_ID = re.compile(r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+ \([A-Z0-9]{10}\)')
 MAX_CATALOG_BYTES = 32_768
-
-
-def safari_extension_id(value):
-    if isinstance(value, str) and len(value) <= 255 and SAFARI_EXTENSION_ID.fullmatch(value):
-        return value
-    return ''
 
 
 def chromium_extension_id(value):
@@ -38,8 +31,7 @@ def public_config(user, catalog=None):
         return None
 
     chrome_id = chromium_extension_id(getattr(settings, 'CRYPTO_AGENT_CHROME_EXTENSION_ID', ''))
-    safari_id = safari_extension_id(getattr(settings, 'CRYPTO_AGENT_SAFARI_EXTENSION_ID', ''))
-    if (not chrome_id or not safari_id) and catalog is None and getattr(settings, 'CRYPTO_AGENT_PACKAGE_DIR', None):
+    if catalog is None and getattr(settings, 'CRYPTO_AGENT_PACKAGE_DIR', None):
         catalog = package_catalog()
     catalog = catalog or {}
 
@@ -47,7 +39,7 @@ def public_config(user, catalog=None):
         'userId': user.pk,
         'chromeExtensionId': chrome_id or catalog_extension_id(catalog, 'chromium_extension_id'),
         'edgeExtensionId': chromium_extension_id(getattr(settings, 'CRYPTO_AGENT_EDGE_EXTENSION_ID', '')),
-        'safariExtensionId': safari_id or catalog_extension_id(catalog, 'safari_extension_id'),
+        'safariBundled': any(package.get('safari_bundled') for package in catalog.values()),
         'minVersion': settings.CRYPTO_AGENT_MIN_VERSION,
         'required': getattr(settings, 'NATIVE_SIGNING_REQUIRED', False),
     }
@@ -85,9 +77,8 @@ def package_catalog():
                 continue
             catalog[target] = {'label': TARGETS[target], 'version': version, 'filename': name,
                                'sha256': digest, 'path': path}
-            safari_id = safari_extension_id(item.get('safari_extension_id'))
-            if platform == 'macos' and safari_id:
-                catalog[target]['safari_extension_id'] = safari_id
+            if platform == 'macos' and item.get('safari_bundled') is True:
+                catalog[target]['safari_bundled'] = True
             chromium_id = chromium_extension_id(item.get('chromium_extension_id'))
             if chromium_id:
                 catalog[target]['chromium_extension_id'] = chromium_id

@@ -49,7 +49,6 @@ app=''
 if [[ "$platform" == Darwin && -d "$package/CPQA Crypto Agent.app" ]]; then
     source_app="$package/CPQA Crypto Agent.app"
     /usr/bin/codesign --verify --deep --strict "$source_app"
-    /usr/sbin/spctl --assess --type execute "$source_app"
     apps="$HOME/Applications"
     mkdir -p -- "$apps"
     app="$apps/CPQA Crypto Agent.app"
@@ -107,7 +106,9 @@ printf '%s\n' 'Crypto Agent installed.' \
     'In Chrome, Edge, Brave, or Chromium, open Extensions, enable Developer mode, and choose Load unpacked.'
 printf 'Select this folder: %s\n' "$root/extension"
 if [[ -n "$app" ]]; then
-    printf '%s\n' 'In Safari, enable CPQA in Safari → Settings → Extensions and allow your CPQA site.'
-    /usr/bin/open -g "$app"
+    printf '%s\n' 'In Safari Developer settings, allow unsigned extensions. Enable CPQA under Extensions and allow your CPQA site.'
+    if ! /usr/bin/open -g "$app"; then
+        printf 'Open the installed app once in Finder to register its Safari extension: %s\n' "$app"
+    fi
 fi
 printf '%s\n' 'Return to CPQA → Security Keys and choose Check Crypto Agent.'
