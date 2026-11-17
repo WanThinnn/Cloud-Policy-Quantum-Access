@@ -756,7 +756,68 @@
         }
     }
 
+    function renderPreviewVerification(response) {
+        const container = document.getElementById('preview-signatures');
+        if (!container) return;
+        const origin = response?.headers.get('X-CPQA-Origin');
+        const timestamp = response?.headers.get('X-CPQA-Timestamp');
+        let verificationHtml = '';
+
+        if (origin === 'verified') {
+            verificationHtml = `
+                <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded flex items-center gap-2 cursor-help">
+                    <svg class="w-4 h-4 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                    <span class="text-xs font-medium text-green-800 dark:text-green-300">Origin Verified</span>
+                    <div class="absolute top-full left-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
+                        <p class="font-bold mb-1 text-green-300">Origin & Integrity Verified</p>
+                        <p class="text-gray-300">This file has not been tampered with since upload. The ML-DSA-87 signature is mathematically valid.</p>
+                        <div class="absolute -top-1 left-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
+                    </div>
+                </div>`;
+        } else if (origin === 'invalid') {
+            verificationHtml = `
+                <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded flex items-center gap-1.5 cursor-help">
+                    <svg class="w-4 h-4 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                    <span class="text-xs font-medium text-red-800 dark:text-red-300">Origin Invalid</span>
+                    <div class="absolute top-full left-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
+                        <p class="font-bold mb-1 text-red-400">⚠️ ORIGIN VERIFICATION FAILED</p>
+                        <p class="text-gray-300">The file content does not match the ML-DSA-87 signature. It may have been corrupted or tampered with.</p>
+                        <div class="absolute -top-1 left-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
+                    </div>
+                </div>`;
+        }
+
+        if (origin === 'verified' && timestamp === 'verified') {
+            const signedAt = new Date(response.headers.get('X-CPQA-Signed-At')).toLocaleString();
+            verificationHtml += `
+                <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded flex items-center gap-2 cursor-help">
+                    <svg class="w-4 h-4 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <span class="text-xs font-medium text-blue-800 dark:text-blue-300">Time Verified</span>
+                    <div class="absolute top-full right-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
+                        <p class="font-bold mb-1 text-blue-300">Trusted Timestamp Verified</p>
+                        <p class="text-gray-300">The timestamp signature from the CyberFortress Root CA is valid.</p>
+                        <p class="text-gray-400 mt-1">Time of signature: ${signedAt}</p>
+                        <div class="absolute -top-1 right-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
+                    </div>
+                </div>`;
+        } else if (origin === 'verified' && timestamp === 'invalid') {
+            verificationHtml += `
+                <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded flex items-center gap-2 cursor-help">
+                    <svg class="w-4 h-4 text-yellow-600 dark:text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                    <span class="text-xs font-medium text-yellow-800 dark:text-yellow-300">Time Invalid</span>
+                    <div class="absolute top-full right-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
+                        <p class="font-bold mb-1 text-yellow-300">Time Signature Invalid</p>
+                        <p class="text-gray-300">The timestamp signature from the Root CA could not be verified. The timestamp may have been altered.</p>
+                        <div class="absolute -top-1 right-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
+                    </div>
+                </div>`;
+        }
+
+        container.innerHTML = verificationHtml;
+    }
+
     async function previewFile(filePath, event) {
+        renderPreviewVerification();
         if (event) event.stopPropagation();
 
         currentContextFile = filePath;
@@ -827,108 +888,7 @@
 
             const blob = await response.blob();
             
-            // PQC Signature Verification
-            // PQC Signature Verification (Async Non-Blocking UI)
-            if (fileObj && fileObj.metadata && fileObj.metadata.user_signature && fileObj.metadata.signer_public_key) {
-                const sigContainer = document.getElementById('preview-signatures');
-                if (sigContainer) {
-                    sigContainer.innerHTML = `
-                    <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded flex items-center gap-2">
-                        <svg class="animate-spin w-4 h-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <span class="text-xs font-medium text-gray-500 text-center leading-tight">Verifying<br/>Signature</span>
-                    </div>`;
-                }
-
-                // Defer the heavy WASM execution so the file preview loads instantly
-                setTimeout(async () => {
-                    try {
-                        let sigVerificationHtml = '';
-                        const buffer = await blob.arrayBuffer();
-                        if (typeof pqcManager !== 'undefined') {
-                            const { signing_payload, user_signature, signer_public_key } = fileObj.metadata;
-                            let isValid;
-                            if (signing_payload) {
-                                const intent = JSON.parse(signing_payload);
-                                isValid = intent.protocol === 'cpqa-crypto/v1' && intent.operation === 'sign_document'
-                                    && intent.sha3_256 === sha3_256(buffer)
-                                    && await pqcManager.verifySignatureRaw(new TextEncoder().encode(signing_payload), user_signature, signer_public_key);
-                            } else {
-                                isValid = await pqcManager.verifySignature(buffer, user_signature, signer_public_key);
-                            }
-                            if (isValid) {
-                                sigVerificationHtml = `
-                                <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded flex items-center gap-2 cursor-help">
-                                    <svg class="w-4 h-4 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-                                    <span class="text-xs font-medium text-green-800 dark:text-green-300">Origin Verified</span>
-                                    <div class="absolute top-full left-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
-                                        <p class="font-bold mb-1 text-green-300">Origin & Integrity Verified</p>
-                                        <p class="text-gray-300">This file has not been tampered with since upload. The ML-DSA-87 signature is mathematically valid.</p>
-                                        <div class="absolute -top-1 left-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
-                                    </div>
-                                </div>`;
-                                
-                                // Check TSA Signature
-                                if (fileObj.metadata.tsa_signature && fileObj.metadata.trusted_timestamp) {
-                                    const isTsaValid = await pqcManager.verifyTSASignature(
-                                        buffer, 
-                                        fileObj.metadata.user_signature, 
-                                        fileObj.metadata.trusted_timestamp, 
-                                        fileObj.metadata.tsa_signature
-                                    );
-                                    
-                                    const tsDate = new Date(fileObj.metadata.trusted_timestamp).toLocaleString();
-                                    
-                                    if (isTsaValid) {
-                                        sigVerificationHtml += `
-                                        <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded flex items-center gap-2 cursor-help">
-                                            <svg class="w-4 h-4 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                                            <span class="text-xs font-medium text-blue-800 dark:text-blue-300">Time Verified</span>
-                                            <div class="absolute top-full right-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
-                                                <p class="font-bold mb-1 text-blue-300">Trusted Timestamp Verified</p>
-                                                <p class="text-gray-300">The timestamp signature from the CyberFortress Root CA is valid.</p>
-                                                <p class="text-gray-400 mt-1">Time of signature: ${tsDate}</p>
-                                                <div class="absolute -top-1 right-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
-                                            </div>
-                                        </div>`;
-                                    } else {
-                                        sigVerificationHtml += `
-                                        <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded flex items-center gap-2 cursor-help">
-                                            <svg class="w-4 h-4 text-yellow-600 dark:text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-                                            <span class="text-xs font-medium text-yellow-800 dark:text-yellow-300">Time Invalid</span>
-                                            <div class="absolute top-full right-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
-                                                <p class="font-bold mb-1 text-yellow-300">Time Signature Invalid</p>
-                                                <p class="text-gray-300">The timestamp signature from the Root CA could not be verified. The timestamp may have been altered.</p>
-                                                <div class="absolute -top-1 right-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
-                                            </div>
-                                        </div>`;
-                                    }
-                                }
-                            } else {
-                                sigVerificationHtml = `
-                                <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded flex items-center gap-1.5 cursor-help">
-                                    <svg class="w-4 h-4 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-                                    <span class="text-xs font-medium text-red-800 dark:text-red-300">Origin Invalid</span>
-                                    <div class="absolute top-full left-0 mt-2 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none text-left" style="width: 280px;">
-                                        <p class="font-bold mb-1 text-red-400">⚠️ ORIGIN VERIFICATION FAILED</p>
-                                        <p class="text-gray-300">The file content does not match the ML-DSA-87 signature. It may have been corrupted or tampered with.</p>
-                                        <div class="absolute -top-1 left-[60px] w-2 h-2 bg-gray-900 rotate-45"></div>
-                                    </div>
-                                </div>`;
-                            }
-                        }
-                        if (sigContainer) sigContainer.innerHTML = sigVerificationHtml;
-                    } catch (err) {
-                        console.error("Sig Verify Error", err);
-                        if (sigContainer) sigContainer.innerHTML = '';
-                    }
-                }, 50);
-            } else {
-                const sigContainer = document.getElementById('preview-signatures');
-                if (sigContainer) sigContainer.innerHTML = '';
-            }
+            renderPreviewVerification(response);
 
             // Handle different file types
             if (['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp'].includes(ext)) {
@@ -1442,9 +1402,13 @@
         // Setup PQC Signature
         let userSignature = null;
         let useNativeSigning = false;
+        const signingButton = document.getElementById('submit-upload');
+        if (signingButton.disabled) return;
         try {
             useNativeSigning = Boolean(window.cpqaCryptoAgent?.shouldSignDocument());
             if (useNativeSigning) {
+                signingButton.disabled = true;
+                signingButton.textContent = 'Confirm in the system prompt…';
                 const signature = await window.cpqaCryptoAgent.signDocument(file, targetPath, Boolean(window.isVersionUpload));
                 userSignature = signature.signature;
                 formData.append('signing_request_id', signature.requestId);
@@ -1454,6 +1418,11 @@
                 userSignature = await pqcManager.signFile(fileBuffer);
             }
         } catch (err) {
+            const verificationMessage = window.cpqaCryptoAgent?.verificationMessage(err.code);
+            if (useNativeSigning && verificationMessage) {
+                showAlert(verificationMessage, 'error');
+                return;
+            }
             if (useNativeSigning && err.code !== 'server_rejected_request') {
                 const container = document.getElementById('upload-error-container');
                 const errorText = document.getElementById('upload-error-text');
@@ -1474,6 +1443,11 @@
                 : 'PQC Signature Failed: ' + err.message;
             showAlert(message, 'error');
             return;
+        } finally {
+            if (useNativeSigning) {
+                signingButton.disabled = false;
+                signingButton.textContent = 'Confirm Upload';
+            }
         }
 
         // Prepare form data for API
@@ -1530,7 +1504,7 @@
             progressBar.style.width = '0%';
             progressText.textContent = '0%';
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Uploading...';
+            submitBtn.textContent = useNativeSigning ? 'Signed. Uploading…' : 'Uploading...';
 
             // Simulate upload progress (in real scenario, use XMLHttpRequest for progress)
             let progress = 0;
@@ -1577,7 +1551,7 @@
                 // Backend now handles policy creation and assignment within the upload API itself
                 // so we don't need to call assignPolicyToUploadedFile here.
                 
-                showAlert('✅ Upload successful!', 'success');
+                showAlert(useNativeSigning ? 'Document signed and uploaded.' : '✅ Upload successful!', 'success');
                 closeUploadModal();
                 folderCache.clear();
                 loadFolder(currentPath);
@@ -2439,6 +2413,7 @@
     }
 
     async function previewFileVersion(filePath, versionNumber) {
+        renderPreviewVerification();
         closeVersionHistoryModal(); // Close version modal so preview is visible
         
         const fileName = filePath.split('/').pop();
@@ -2472,6 +2447,7 @@
                 throw new Error("Cannot load preview file");
             }
 
+            renderPreviewVerification(response);
             const contentType = response.headers.get('content-type');
             const blob = await response.blob();
             const url = window.URL.createObjectURL(blob);

@@ -6,6 +6,7 @@
     const extension = document.getElementById('crypto-agent-extension');
     const downloads = document.getElementById('crypto-agent-downloads');
     const status = document.getElementById('crypto-agent-status');
+    const bundledSetup = downloads.dataset.bundledSetup === 'true';
     if (agent.extensionUrl) extension.href = agent.extensionUrl;
 
     async function suggestPackage() {
@@ -32,15 +33,18 @@
     }
 
     function display(state, version) {
-        extension.hidden = !agent.extensionUrl || !['extension_unreachable', 'extension_outdated'].includes(state);
+        extension.hidden = bundledSetup || !agent.extensionUrl
+            || !['extension_unreachable', 'extension_outdated'].includes(state);
         enroll.hidden = state !== 'enrollment_required';
-        if (['agent_outdated', 'host_unreachable', 'upstream_library_unavailable', 'invalid_installation',
-            'upstream_abi_unavailable'].includes(state)) downloads.open = true;
         const messages = {
             ready: `Crypto Agent ${version} is ready to sign on this device.`,
             enrollment_required: `Crypto Agent ${version} is connected. Register this device to sign.`,
             extension_unconfigured: 'Your administrator has not configured the Crypto Agent browser extension.',
-            extension_unreachable: 'The extension did not respond. Install or enable it in Chrome or Edge, then check again.',
+            extension_unreachable: agent.isSafari
+                ? 'Install the macOS package, enable CPQA in Safari Settings → Extensions, and allow it on this site.'
+                : bundledSetup
+                    ? 'Run setup from the ZIP and load the installed extension folder in your Chromium browser.'
+                    : 'Install or enable the CPQA extension in your Chromium browser, then check again.',
             extension_outdated: 'Update the browser extension, then check again.',
             agent_outdated: 'Update Crypto Agent, then check again.',
             host_unreachable: 'The browser extension responded, but could not open Crypto Agent. Install or repair the agent, then check again.',
@@ -52,17 +56,22 @@
             enrollment_expired: 'The registration request expired. Try registering again.',
             agent_timeout: 'Crypto Agent timed out. Check for a system credential prompt, then try again.',
         };
-        status.textContent = messages[state] || 'Crypto Agent could not complete this request. Check the installation settings.';
+        status.textContent = agent.verificationMessage(state) || messages[state]
+            || 'Crypto Agent could not complete this request. Check the installation settings.';
     }
 
     async function update(register) {
+        if (check.disabled) return;
         check.disabled = enroll.disabled = true;
-        status.textContent = register ? 'Registering this signing device…' : 'Checking Crypto Agent…';
+        status.textContent = register ? 'Confirm device registration in the system prompt…' : 'Checking Crypto Agent…';
         try {
             if (register) await agent.enroll();
             const result = await agent.inspect();
             display(result.state, result.version);
-            if (register && result.state === 'ready') window.loadKeys?.();
+            if (register && result.state === 'ready') {
+                status.textContent = 'Signing device registered. Confirm each signature in the system prompt.';
+                window.loadKeys?.();
+            }
         } catch (error) {
             const wasVisible = !enroll.hidden;
             display(error.code);

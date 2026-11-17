@@ -25,29 +25,50 @@
                 <button type="button" id="crypto-agent-enroll" hidden class="rounded-md border px-4 py-2 text-sm text-indigo-700 dark:text-indigo-300">Register signing device</button>
             </div>
             {% if crypto_agent %}
-            <details id="crypto-agent-downloads" class="mt-4 text-sm text-gray-600 dark:text-gray-300">
-                <summary class="cursor-pointer font-medium">Download an installer</summary>
-                <ul class="mt-2 space-y-3">
+            <section id="crypto-agent-downloads" aria-labelledby="crypto-agent-download-title"
+                     data-bundled-setup="{{ bundled_agent_setup|yesno:'true,false' }}"
+                     class="mt-5 border-t border-gray-200 pt-4 text-sm text-gray-600 dark:border-gray-700 dark:text-gray-300">
+                <h3 id="crypto-agent-download-title" class="font-semibold text-gray-900 dark:text-white">Download Crypto Agent</h3>
+                <ul class="mt-3 space-y-3">
                     {% for package in agent_packages %}
                     <li data-agent-target="{{ package.target }}">
-                        <a href="{{ package.url }}" class="font-medium text-indigo-700 underline dark:text-indigo-300">{{ package.label }} · {{ package.version }}</a>
-                        <span class="block break-all text-xs">SHA-256 {{ package.sha256 }}</span>
-                        {% if package.install_command %}
-                        <span class="block text-xs">Extract the ZIP, then run <code>{{ package.install_command }}</code> from that folder.</span>
+                        <a href="{{ package.url }}" class="inline-flex rounded-md border border-indigo-200 px-3 py-2 font-medium text-indigo-700 hover:underline dark:border-indigo-800 dark:text-indigo-300">Download {{ package.label }}{% if package.setup_script %} ZIP{% endif %}</a>
+                        {% if package.is_macos and not package.safari_bundled %}
+                        <p class="mt-1">For Chrome, Edge, Brave, and other Chromium browsers.</p>
                         {% endif %}
+                        {% if package.setup_script %}
+                        <p class="mt-1">Extract the ZIP and run <code>{{ package.install_command }}</code> once from the extracted folder.</p>
+                        {% elif package.install_command %}
+                        <p class="mt-1">Extract the ZIP, then run <code>{{ package.install_command }}</code> from that folder.</p>
+                        {% endif %}
+                        <details class="mt-1 text-xs">
+                            <summary class="cursor-pointer">Version {{ package.version }} and SHA-256</summary>
+                            <span class="block break-all">{{ package.sha256 }}</span>
+                        </details>
                     </li>
                     {% empty %}
                     <li>No installers have been published for this deployment.</li>
                     {% endfor %}
                 </ul>
-                <p class="mt-3">Run the installer on this device, then return here and check again. If your platform is missing, contact your administrator.</p>
-            </details>
+                {% if bundled_agent_setup %}
+                <details class="mt-4">
+                    <summary class="cursor-pointer font-medium">Enable the browser extension</summary>
+                    <ul class="mt-2 list-disc space-y-2 pl-5">
+                        <li><strong>Chrome, Edge, Brave, and other Chromium browsers.</strong> Open the browser's Extensions page, turn on Developer mode, and choose Load unpacked. Select the local <code>extension</code> folder printed by setup.</li>
+                        {% if bundled_safari_setup %}
+                        <li><strong>Safari on Mac.</strong> Open Safari → Settings → Extensions, enable CPQA Crypto Agent, and allow access to this site.</li>
+                        {% endif %}
+                    </ul>
+                    <p class="mt-2">Reload CPQA and choose <strong>Check Crypto Agent</strong>.</p>
+                </details>
+                {% endif %}
+            </section>
             {% endif %}
         </section>
         {% if crypto_agent %}
         {{ crypto_agent|json_script:"crypto-agent-config" }}
-        <script defer src="{% static 'js/crypto-agent.js' %}?v=2"></script>
-        <script defer src="{% static 'js/crypto-agent-setup.js' %}"></script>
+        <script defer src="{% static 'js/crypto-agent.js' %}?v=6"></script>
+        <script defer src="{% static 'js/crypto-agent-setup.js' %}?v=5"></script>
         {% endif %}
         
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -293,7 +314,7 @@
                                 ${k.native_device_id ? '<p class="text-xs text-gray-500 mt-1">Crypto Agent device</p>' : ''}
                                 ${caVerifiedHtml}
                             </div>
-                            <button onclick="deletePqcKey('${k.id}')" class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300 text-sm font-medium">Revoke</button>
+                            <button onclick="revokePqcKey('${k.id}', ${Boolean(k.native_device_id)})" class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300 text-sm font-medium">Revoke</button>
                         </li>
                         `;
                     }));
@@ -322,24 +343,33 @@
         }
     }
 
-    async function deletePqcKey(id) {
+    async function revokePqcKey(id, isNative) {
         if (!confirm('Are you sure you want to revoke this Signature Key? You will need to create a new one to sign documents.')) return;
         
         try {
-            const res = await fetch(`/api/pki/keys/${id}/`, {
-                method: 'DELETE',
+            const res = await fetch(`/api/pki/keys/${id}/revoke/`, {
+                method: 'POST',
                 headers: { 'X-CSRFToken': getCookie('csrftoken') }
             });
-            if (!res.ok) throw new Error('Failed to revoke PQC key');
-            
-            // Clear local storage
-            localStorage.removeItem('pqc_public_key');
-            localStorage.removeItem('pqc_private_key');
-            localStorage.removeItem('pqc_device_id');
-            localStorage.removeItem('pqc_credential_id');
-            sessionStorage.removeItem('pqc_unlocked_private_key');
-            
-            alert('Signature Key revoked on server and local data cleared.\n\nNOTE: You must manually delete the associated Passkey (named "'+localStorage.getItem('username')+' (Signature)") from your device settings.');
+            if (!res.ok) {
+                const error = await res.json().catch(() => ({}));
+                throw new Error(error.detail || error.message || 'Failed to revoke signature key');
+            }
+
+            if (isNative) {
+                alert('Signing device revoked. Historical signatures can still be verified.');
+                document.getElementById('crypto-agent-check')?.click();
+            } else {
+                if (typeof pqcManager !== 'undefined' && String(pqcManager.activeKeyId) === id) {
+                    pqcManager.lock();
+                }
+                localStorage.removeItem('pqc_public_key');
+                localStorage.removeItem('pqc_private_key');
+                localStorage.removeItem('pqc_device_id');
+                localStorage.removeItem('pqc_credential_id');
+                sessionStorage.removeItem('pqc_unlocked_private_key');
+                alert('Signature key revoked. Remove its signature passkey separately in your device settings if needed.');
+            }
             loadKeys();
         } catch (e) {
             alert('Error: ' + e.message);

@@ -4,13 +4,17 @@
     const config = JSON.parse(node.textContent);
     const protocol = 'cpqa-crypto/v1';
     const localKey = `cpqa-crypto-agent-device:${config.userId}`;
-    const browser = (navigator.userAgentData?.brands || []).some(({ brand }) => brand === 'Microsoft Edge')
-        || /\bEdg\//.test(navigator.userAgent) ? 'edge' : 'chrome';
-    const extensionId = browser === 'edge'
-        ? config.edgeExtensionId || config.chromeExtensionId : config.chromeExtensionId;
-    const extensionUrl = extensionId && (browser === 'edge' && config.edgeExtensionId
-        ? `https://microsoftedge.microsoft.com/addons/detail/${extensionId}`
-        : `https://chromewebstore.google.com/detail/${extensionId}`);
+    const isSafari = /Macintosh.*Version\/.*Safari\//.test(navigator.userAgent)
+        && navigator.vendor === 'Apple Computer, Inc.' && navigator.maxTouchPoints < 2;
+    const isEdge = (navigator.userAgentData?.brands || []).some(({ brand }) => brand === 'Microsoft Edge')
+        || /\bEdg\//.test(navigator.userAgent);
+    const extensionIds = [...new Set((isSafari ? [config.safariExtensionId]
+        : [isEdge && config.edgeExtensionId, config.chromeExtensionId]).filter(Boolean))];
+    let connectedExtension;
+    const runtime = isSafari ? window.browser?.runtime : window.chrome?.runtime;
+    const extensionUrl = !isSafari && extensionIds[0] && (isEdge && config.edgeExtensionId
+        ? `https://microsoftedge.microsoft.com/addons/detail/${extensionIds[0]}`
+        : `https://chromewebstore.google.com/detail/${extensionIds[0]}`);
 
     class AgentError extends Error {
         constructor(code) {
@@ -19,15 +23,30 @@
         }
     }
 
-    function call(command) {
-        if (!extensionId) return Promise.reject(new AgentError('extension_unconfigured'));
-        if (!window.chrome?.runtime?.sendMessage) return Promise.reject(new AgentError('extension_unreachable'));
+    function verificationMessage(code) {
+        return {
+            os_verification_cancelled: 'System verification was cancelled. Try again when you are ready.',
+            os_verification_denied: 'System verification failed. Try again with your configured sign-in method.',
+            os_verification_unavailable: 'System verification is unavailable. Check the Crypto Agent setup for this operating system.',
+            os_verification_busy: 'Close any other verification prompt and try again.',
+            os_verification_browser_focus: 'Bring this browser window to the front and try again.',
+            os_verification_unsupported: 'This platform does not yet support the required system verification.',
+            signing_intent_expired: 'The request expired. Start again to get a new verification prompt.',
+            agent_timeout: 'Crypto Agent timed out. Close any pending verification prompt and try again.',
+        }[code];
+    }
+
+    function send(extensionId, command) {
+        if (!runtime?.sendMessage) return Promise.reject(new AgentError('extension_unreachable'));
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new AgentError('agent_timeout')), 45000);
+            const interactive = ['enroll_signing_key', 'sign_document'].includes(command.operation);
+            const probe = command.operation === 'probe_extension';
+            const timeout = interactive ? 125000 : probe ? 5000 : 45000;
+            const timer = setTimeout(() => reject(new AgentError(probe ? 'extension_unreachable' : 'agent_timeout')), timeout);
             try {
-                chrome.runtime.sendMessage(extensionId, { protocol, command }, response => {
+                runtime.sendMessage(extensionId, { protocol, command }, response => {
                     clearTimeout(timer);
-                    if (chrome.runtime.lastError || !response) {
+                    if (runtime.lastError || !response) {
                         reject(new AgentError('extension_unreachable'));
                     } else if (!response.ok) {
                         reject(new AgentError(response.code));
@@ -40,6 +59,25 @@
                 reject(new AgentError('extension_unreachable'));
             }
         });
+    }
+
+    async function connectExtension() {
+        if (!extensionIds.length) throw new AgentError('extension_unconfigured');
+        for (const extensionId of extensionIds) {
+            try {
+                const extension = await send(extensionId, { operation: 'probe_extension' });
+                if (extension?.protocol !== protocol) throw new AgentError('extension_outdated');
+                return extensionId;
+            } catch (error) {
+                if (error.code !== 'extension_unreachable') throw error;
+            }
+        }
+        throw new AgentError('extension_unreachable');
+    }
+
+    async function call(command) {
+        connectedExtension ??= await connectExtension();
+        return send(connectedExtension, command);
     }
 
     async function api(action, data) {
@@ -69,11 +107,12 @@
     }
 
     async function inspect() {
-        const extension = await call({ operation: 'probe_extension' });
-        if (extension?.protocol !== protocol) throw new AgentError('extension_outdated');
+        connectedExtension = undefined;
+        connectedExtension = await connectExtension();
         const deviceId = localStorage.getItem(localKey);
         const result = await call({ operation: 'get_capabilities', user_id: config.userId, device_id: deviceId });
-        if (!compatible(result)) return { state: 'agent_outdated' };
+        if (!compatible(result) || result.user_verification !== 'per_operation') return { state: 'agent_outdated' };
+        if (result.verification_error) throw new AgentError(result.verification_error);
         if (deviceId && result.has_key) {
             const devices = await api('signing_devices');
             if (devices.some(device => device.device_id === deviceId && device.status === 'active')) {
@@ -129,5 +168,7 @@
         return config.required || Boolean(localStorage.getItem(localKey));
     }
 
-    window.cpqaCryptoAgent = { extensionUrl, inspect, enroll, signDocument, shouldSignDocument };
+    window.cpqaCryptoAgent = {
+        extensionUrl, isSafari, inspect, enroll, signDocument, shouldSignDocument, verificationMessage,
+    };
 })();

@@ -5,29 +5,84 @@ web hiển thị cho trình duyệt hoặc thiết bị. Danh sách chỉ hiện
 viên đã phát hành. Nếu web gợi ý một gói, kiểm tra kiến trúc máy trước khi tải.
 Nếu nút kiểm tra bị vô hiệu hóa, quản trị viên cần bật Crypto Agent cho môi trường này.
 
-1. Cài extension do công ty cung cấp trên Chrome hoặc Edge rồi tải lại trang CPQA.
-2. Tải gói đúng hệ điều hành, đối chiếu SHA-256 hiển thị và giải nén. Với ZIP
-   pilot, chạy `powershell -File .\install.ps1` trên Windows hoặc
-   `bash ./install.sh` trên macOS/Linux từ thư mục đã giải nén. Script cài
-   cho tài khoản hệ điều hành hiện tại và đăng ký Native Messaging.
-3. Quay lại CPQA, chọn **Check Crypto Agent**, rồi **Register signing device**.
-   Kiểm tra lại nếu đổi hồ sơ trình duyệt. Mỗi hồ sơ có tham chiếu đăng ký riêng.
+1. Đăng nhập CPQA và vào **Security Keys → Download Crypto Agent**. Tải ZIP
+   đúng hệ điều hành, đối chiếu SHA-256 rồi giải nén. ZIP chứa agent, extension
+   và hướng dẫn tiếng Anh `SETUP.md`.
+2. Chạy setup một lần từ thư mục đã giải nén bằng tài khoản dùng trình duyệt.
+   Trên Windows chạy `powershell -NoProfile -File .\setup.ps1`. Trên macOS và
+   Linux chạy `bash ./setup.sh`. Script tự chọn thư mục cài.
+3. Bật extension theo hướng dẫn cho trình duyệt bên dưới.
+4. Quay lại CPQA và chọn **Check Crypto Agent**. Khi nền tảng cho phép đăng
+   ký, chọn **Register signing device**. Mỗi hồ sơ có tham chiếu đăng ký riêng.
+
+### Bật extension Chromium
+
+1. Mở trang Extensions. Chrome và Chromium dùng `chrome://extensions`, Edge
+   dùng `edge://extensions`, Brave dùng `brave://extensions`, Vivaldi dùng
+   `vivaldi://extensions`.
+2. Bật **Developer mode**, chọn **Load unpacked**, rồi chọn thư mục cục bộ
+   `extension` mà setup in ra. Tải lại CPQA. Có thể xóa thư mục ZIP đã giải nén
+   sau khi cài.
+
+Setup đăng ký native host theo vị trí hồ sơ mặc định. Trình duyệt Chromium
+tùy biến hoặc thiết bị được quản lý có thể cần quản trị viên cho phép Native
+Messaging và extension dạng unpacked. Tuân thủ chính sách chạy script và
+extension của thiết bị.
+
+### Bật extension Safari trên macOS
+
+Với gói có Safari, setup cài ứng dụng vào `~/Applications`. Mở **Safari → Settings →
+Extensions**, bật **CPQA Crypto Agent**, cấp quyền cho trang CPQA rồi tải lại.
+
+Gói macOS và Linux hỗ trợ kiểm tra kết nối. Hai nền tảng này hiện từ chối đăng
+ký và ký native cho tới khi có cơ chế bảo vệ khóa và xác minh người dùng.
 
 ## Phát hành bộ cài
 
 Chạy workflow thủ công **Build Crypto Agent installers** với HTTPS origin của
-CPQA và ID extension Chrome/Edge. Workflow build agent native và sinh ZIP bộ
-cài, ZIP extension cùng mục catalog cho từng nền tảng. ZIP extension có thể
-dùng cho triển khai có quản lý. Bản unpacked pilot cần public key DER Base64
-tương ứng với ID đã cấu hình. Phân phối extension qua Chrome Web Store,
-Microsoft Edge Add-ons hoặc chính sách trình duyệt của doanh nghiệp. Liên kết
-trên web dẫn đến store tương ứng với ID đã cấu hình.
+CPQA, ID extension Chromium và **public key** DER Base64 tương ứng. Workflow
+tạo một ZIP trọn bộ và mục catalog cho mỗi nền tảng. Public key giúp extension
+đi kèm giữ nguyên ID dù thư mục cài trên mỗi máy khác nhau. Có thể thêm ID
+Edge Add-ons nếu đã phát hành extension riêng qua store.
+
+Workflow mặc định build ZIP Chromium cho Windows, Linux, Mac Intel và Apple
+silicon. Luồng này không cần tài khoản Apple Developer.
+
+Truyền `safari_bundle_id` để thêm Safari vào gói macOS đã qua notarization.
+Các job này dùng GitHub environment `crypto-agent-macos`. Đặt biến
+`APPLE_TEAM_ID` và các secret sau trong environment đó. Giới hạn environment
+vào các nhánh hoặc tag tin cậy.
+
+| Secret | Giá trị |
+| --- | --- |
+| `APPLE_DEVELOPER_ID_P12_BASE64` | Tệp PKCS#12 Developer ID Application có khóa ký, mã hóa Base64 |
+| `APPLE_DEVELOPER_ID_P12_PASSWORD` | Mật khẩu của tệp PKCS#12 |
+| `APPLE_NOTARY_KEY_P8_BASE64` | Tệp API key của team App Store Connect dùng cho notarization, mã hóa Base64 |
+| `APPLE_NOTARY_KEY_ID` | ID của API key dùng cho notarization |
+| `APPLE_NOTARY_ISSUER_ID` | Issuer ID của API key dùng cho notarization |
+
+Sau khi workflow có trên GitHub, chạy từ CLI trên máy local. Đặt các biến shell
+theo origin CPQA, ID và public key của extension Chromium. Để thêm Safari,
+truyền thêm `-f "safari_bundle_id=$macBundleId"`.
+
+```powershell
+rtk gh workflow run crypto-agent.yml --ref $releaseBranch -f "origin=$cpqaOrigin" -f "chrome_id=$chromeExtensionId" -f "extension_key=$chromeExtensionPublicKey"
+rtk gh run list --workflow crypto-agent.yml
+rtk gh run watch $runId --exit-status
+rtk gh run download $runId --pattern 'crypto-agent-*' --dir agent-artifacts
+```
+
+Bỏ `upstream_tag` để lấy release upstream hiện tại, hoặc truyền
+`-f upstream_tag=v6.0.0` để dùng cùng
+tag trên mọi runner. Khi build từ mã nguồn upstream tại máy local, dùng
+`package_agent.py` với `--source source --ref` và các dependency build
+của thư viện.
 
 Để build pilot Windows ở local, chạy trong x64 Visual Studio developer shell
 có Python và Rust. Thay ID minh họa bằng ID extension triển khai thực tế.
 
 ```powershell
-python src/crypto_agent/package_agent.py --origin https://cloudsafe.cyberfortress.local --extension-id YOUR_EXTENSION_ID --ref v6.0.0 --output-dir src/crypto_agent/target/distribution
+rtk python src/crypto_agent/package_agent.py --origin $cpqaOrigin --extension-id $chromeExtensionId --extension-key $chromeExtensionPublicKey --ref v6.0.0 --output-dir src/crypto_agent/target/distribution
 ```
 
 Với một nền tảng, chép bộ cài và `manifest.json` vào `config/crypto-agent/`
@@ -37,8 +92,11 @@ version lên trước, sau đó thay catalog. Compose mặc định cho Django �
 mục này tại `/config/crypto-agent`. Chỉ cấp quyền ghi cho operator phát hành.
 
 Trong môi trường deploy, đặt `CRYPTO_AGENT_ORIGIN` trùng với origin lúc đóng
-gói. Cấu hình `CRYPTO_AGENT_CHROME_EXTENSION_ID` và có thể thêm
-`CRYPTO_AGENT_EDGE_EXTENSION_ID`. Đặt `CRYPTO_AGENT_MIN_VERSION` là version
+gói. CPQA đọc ID extension từ catalog đã phát hành. Các biến
+`CRYPTO_AGENT_CHROME_EXTENSION_ID` và `CRYPTO_AGENT_SAFARI_EXTENSION_ID`
+được ưu tiên nếu đã cấu hình. Nếu có extension riêng trên Edge Add-ons,
+đặt thêm `CRYPTO_AGENT_EDGE_EXTENSION_ID`. Giữ một ID Chromium chung cho
+các gói trong catalog. Đặt `CRYPTO_AGENT_MIN_VERSION` là version
 tối thiểu tương thích. Áp dụng Django migration, tạo lại container web với
 `NATIVE_SIGNING_ENABLED=true` và kiểm tra luồng setup bằng tài khoản pilot.
 Giữ `NATIVE_SIGNING_REQUIRED=false` cho đến khi đã kiểm tra phân phối và
@@ -46,16 +104,14 @@ Giữ `NATIVE_SIGNING_REQUIRED=false` cho đến khi đã kiểm tra phân phố
 
 ### Cài Edge lần đầu trên máy pilot Windows
 
-1. Chạy `install.ps1` từ gói agent đã giải nén để đăng ký Native Messaging
-   cho tài khoản Windows hiện tại.
-2. Giải nén `cpqa-crypto-agent-extension.zip` vào thư mục ổn định, ví dụ
-   `%LOCALAPPDATA%\CPQA\Crypto Agent\extension`. Giữ nguyên thư mục này sau
-   khi thêm extension.
-3. Trong hồ sơ Edge dùng để đăng nhập CPQA, mở `edge://extensions`, bật
-   **Developer mode**, bấm **Load unpacked** và chọn thư mục vừa giải nén.
-   Luồng này dành cho pilot với extension build nội bộ.
-4. Tải lại **Manage Security Keys**. Bấm **Check Crypto Agent**,
-   **Register signing device**, rồi kiểm tra lại để thấy trạng thái **Ready**.
+1. Chạy `setup.ps1` từ gói agent đã giải nén để cài agent và đăng ký Native
+   Messaging cho tài khoản Windows hiện tại.
+2. Trong hồ sơ Edge dùng để đăng nhập CPQA, mở `edge://extensions`, bật
+   **Developer mode**, chọn **Load unpacked** rồi chọn
+   `%LOCALAPPDATA%\CPQA\Crypto Agent\extension`.
+3. Tải lại **Manage Security Keys**. Bấm **Check Crypto Agent**,
+   **Register signing device**, xác minh bằng Windows Hello rồi kiểm tra
+   trạng thái thiết bị trên web.
 
 Khi ký bắt buộc đang tắt, tài khoản chưa đăng ký agent trên hồ sơ trình duyệt
 này tiếp tục dùng luồng ký hiện tại. Sau khi đăng ký, upload trong hồ sơ đó
@@ -69,19 +125,26 @@ dev. Khi build lại, giữ nguyên hai giá trị để Edge và Django tiếp 
 
 ```powershell
 $identity = Get-Content -Raw config/crypto-agent/pilot-extension-identity.json | ConvertFrom-Json
-python src/crypto_agent/package_agent.py --origin https://cloudsafe.cyberfortress.local --extension-id $identity.id --extension-key $identity.key --ref v6.0.0 --output-dir src/crypto_agent/target/windows-pilot-next
+rtk python src/crypto_agent/package_agent.py --origin https://cloudsafe.cyberfortress.local --extension-id $identity.id --extension-key $identity.key --ref v6.0.0 --output-dir src/crypto_agent/target/windows-pilot-next
 ```
 
 Sau khi chép gói mới cùng catalog vào `config/crypto-agent/`, có thể nạp lại
 biến môi trường local bằng `rtk docker compose --project-directory . -f
 docker/docker-compose.yml up -d --no-deps --force-recreate web`.
 
-ZIP sinh ra dùng cho pilot. Dùng quy trình ký và phân phối phần mềm của
-doanh nghiệp để phát hành bộ cài production. Yêu cầu ký có thời hạn và ràng
+Áp dụng quy trình ký và phân phối phần mềm của doanh nghiệp. Với gói macOS có
+Safari, Apple Developer ID và notarization xác thực bộ cài. Chữ ký
+tài liệu dùng ML-DSA-87 của upstream. Bản pilot Windows dùng AES-256-GCM để
+bảo vệ private key. Yêu cầu ký có thời hạn và ràng
 buộc hash của file upload với thiết bị đã đăng ký. Thiết bị lưu khóa ML-DSA
 dưới dạng mã hóa và giữ khóa bọc trong kho credential của hệ điều hành.
-Xác minh bảo vệ bằng phần cứng và hộp thoại xác nhận ở mỗi lần ký vẫn đang
-chờ. Giao diện web hiển thị thông tin tài liệu cho người dùng.
+Từ agent 0.2.0, Windows 11 yêu cầu Windows Hello khi đăng ký và ở mỗi lần
+ký. Đưa cửa sổ Edge hoặc Chrome lên trước khi thao tác. Windows chọn PIN,
+vân tay hoặc khuôn mặt theo cấu hình máy. Nếu hủy hoặc hết hạn, thao tác dừng.
+macOS và Linux cần cơ chế xác minh riêng trước khi có thể đăng ký hoặc ký.
+Giao diện web hiển thị thông tin tài liệu, còn hộp thoại Windows Hello xác
+minh người dùng. Khóa bọc hiện dùng kho credential của hệ điều hành.
 
 [Chrome Native Messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
 · [Microsoft Edge Native Messaging](https://learn.microsoft.com/en-us/microsoft-edge/extensions/developer-guide/native-messaging)
+· [Phân phối Safari Web Extension](https://developer.apple.com/documentation/safariservices/distributing-your-safari-web-extension)

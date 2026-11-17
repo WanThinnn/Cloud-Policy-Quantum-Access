@@ -42,10 +42,14 @@ impl Upstream {
         } else {
             "libhybrid-pq-cp-abe.so"
         };
+        #[cfg(target_os = "macos")]
+        if let Some(contents) = crate::agent::mac_app_contents(&exe) {
+            return Self::load_at(&contents.join("Frameworks").join(name));
+        }
         Self::load_at(&exe.with_file_name(name))
     }
 
-    fn load_at(path: &Path) -> Result<Self, &'static str> {
+    pub(crate) fn load_at(path: &Path) -> Result<Self, &'static str> {
         // The installer owns this absolute path and its dependencies.
         let library = open(path).map_err(|_| "upstream_library_unavailable")?;
         // On Windows TKN20 embeds Go. FreeLibrary can unmap code while the Go

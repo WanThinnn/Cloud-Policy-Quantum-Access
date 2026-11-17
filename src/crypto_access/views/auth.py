@@ -73,7 +73,8 @@ def user_profile(request):
 def manage_keys_page(request):
     """Render manage keys page"""
     context = {'page_title': 'Manage Security Keys'}
-    context['crypto_agent'] = agent_packages.public_config(request.user)
+    catalog = agent_packages.package_catalog() if getattr(settings, 'NATIVE_SIGNING_ENABLED', False) else {}
+    context['crypto_agent'] = agent_packages.public_config(request.user, catalog)
     if context['crypto_agent']:
         context['agent_packages'] = [
             {
@@ -81,11 +82,16 @@ def manage_keys_page(request):
                 'version': package['version'],
                 'sha256': package['sha256'],
                 'install_command': package.get('install_command'),
+                'setup_script': package.get('setup_script'),
+                'safari_bundled': bool(package.get('safari_extension_id')),
                 'target': target,
+                'is_macos': target.startswith('macos-'),
                 'url': reverse('crypto_agent_download', args=[target]),
             }
-            for target, package in agent_packages.package_catalog().items()
+            for target, package in catalog.items()
         ]
+        context['bundled_agent_setup'] = any(package['setup_script'] for package in context['agent_packages'])
+        context['bundled_safari_setup'] = any(package['safari_bundled'] for package in context['agent_packages'])
     return render(request, 'accounts/keys.html', context)
 
 

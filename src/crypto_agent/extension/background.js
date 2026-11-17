@@ -1,8 +1,9 @@
 /* Origin and the extension identity are provisioned with the deployment. */
-import { origin } from './deployment.js';
+import { origin, safari } from './deployment.js';
 
 const protocol = 'cpqa-crypto/v1';
 const host = 'com.cpqa.crypto_agent';
+const runtime = safari ? globalThis.browser.runtime : globalThis.chrome.runtime;
 
 function validCommand(command) {
     if (!command || typeof command !== 'object') return false;
@@ -21,10 +22,15 @@ function validCommand(command) {
     }
 }
 
-chrome.runtime.onMessageExternal.addListener((message, sender, reply) => {
-    if (sender.origin !== origin || !sender.url || new URL(sender.url).origin !== origin
-        || sender.frameId !== 0) return false;
-    if (message?.command?.operation === 'probe_extension') {
+runtime.onMessageExternal.addListener((message, sender, reply) => {
+    if (!sender.url || sender.frameId !== 0) return false;
+    if ((!safari || sender.origin !== undefined) && sender.origin !== origin) return false;
+    try {
+        if (new URL(sender.url).origin !== origin) return false;
+    } catch {
+        return false;
+    }
+    if (message?.protocol === protocol && message.command?.operation === 'probe_extension') {
         reply({ ok: true, result: { protocol } });
         return false;
     }
@@ -32,8 +38,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, reply) => {
         reply({ ok: false, code: 'invalid_request' });
         return false;
     }
-    chrome.runtime.sendNativeMessage(host, { protocol, origin, command: message.command }, response => {
-        if (chrome.runtime.lastError || !response) {
+    runtime.sendNativeMessage(host, { protocol, origin, command: message.command }, response => {
+        if (runtime.lastError || !response) {
             reply({ ok: false, code: 'host_unreachable' });
             return;
         }

@@ -573,7 +573,6 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         
         try:
             # OPTIMIZATION: Chunked Hashing (Avoid duplicating massive buffers in RAM)
-            import hashlib
             plaintext_hasher = hashlib.sha3_256()
             for chunk in file.chunks():
                 plaintext_hasher.update(chunk)
@@ -1366,6 +1365,9 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             safe_name = file_name.replace('"', '').replace('\r', '').replace('\n', '')
             encoded_name = urllib.parse.quote(safe_name)
             response['Content-Disposition'] = f"inline; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}"
+            for header, value in native_signing.preview_verification(file_version, file_data).items():
+                response[header] = value
+            response['Cache-Control'] = 'private, no-store'
             return response
             
         except APIException:

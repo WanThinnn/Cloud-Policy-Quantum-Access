@@ -1,9 +1,9 @@
+use crate::upstream::SECRET_BYTES;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng, Payload},
     Aes256Gcm,
 };
-use cpqa_crypto_agent::upstream::SECRET_BYTES;
 use keyring::Entry;
 use std::{fs, io::Write, path::PathBuf};
 use uuid::Uuid;

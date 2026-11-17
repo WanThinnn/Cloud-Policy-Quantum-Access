@@ -20,6 +20,49 @@ from ..models import NativeSigningRequest
 
 PUBLIC_KEY_BYTES = 2592
 SIGNATURE_BYTES = 4627
+INTENT_PROTOCOL = 'cpqa-signing-intent/v2'
+DOCUMENT_PROTOCOLS = {'cpqa-crypto/v1', INTENT_PROTOCOL}
+
+
+def preview_verification(version, data):
+    if not version or not version.user_signature:
+        return {}
+    if not version.signer_public_key_id:
+        return {'X-CPQA-Origin': 'unavailable'}
+    digest = hashlib.sha3_256(data).hexdigest()
+    try:
+        message = data
+        if version.signing_payload:
+            intent = json.loads(version.signing_payload)
+            if (intent['protocol'] not in DOCUMENT_PROTOCOLS or intent['operation'] != 'sign_document'
+                    or intent['sha3_256'] != digest):
+                return {'X-CPQA-Origin': 'invalid'}
+            message = version.signing_payload.encode('ascii')
+        verify_signature(version.signer_public_key.pqc_public_key, version.user_signature, message)
+    except (KeyError, TypeError, ValueError, ValidationError):
+        return {'X-CPQA-Origin': 'invalid'}
+    except SigningUnavailable:
+        return {'X-CPQA-Origin': 'unavailable'}
+    headers = {'X-CPQA-Origin': 'verified'}
+    if version.tsa_signature and version.trusted_timestamp:
+        from ..context_processors import root_ca_public_key
+
+        timestamp = version.trusted_timestamp.isoformat()
+        try:
+            root = root_ca_public_key()
+            if not root:
+                raise SigningUnavailable()
+            message = _canonical({
+                'file_hash': digest, 'issuer': 'CyberFortress-TSA', 'timestamp': timestamp,
+                'user_signature': version.user_signature,
+            }).encode('ascii')
+            verify_signature(root, version.tsa_signature, message)
+            headers.update({'X-CPQA-Timestamp': 'verified', 'X-CPQA-Signed-At': timestamp})
+        except (OSError, SigningUnavailable):
+            headers['X-CPQA-Timestamp'] = 'unavailable'
+        except ValidationError:
+            headers['X-CPQA-Timestamp'] = 'invalid'
+    return headers
 
 
 class SigningUnavailable(APIException):
@@ -97,7 +140,7 @@ def issue(request, kind, *, key=None, **details):
     nonce = uuid.uuid4()
     expires = now + timedelta(minutes=3)
     payload = _canonical({
-        'protocol': 'cpqa-crypto/v1', 'operation': kind, 'request_id': str(nonce),
+        'protocol': INTENT_PROTOCOL, 'operation': kind, 'request_id': str(nonce),
         'user_id': request.user.pk, 'origin': signing_origin(request), 'expires_at': int(expires.timestamp()),
         **details,
     })
@@ -114,7 +157,7 @@ def pending(request, request_id, kind):
     if intent is None:
         raise SigningConflict()
     value = json.loads(intent.payload)
-    if value['operation'] != kind or value['origin'] != signing_origin(request):
+    if value.get('protocol') != INTENT_PROTOCOL or value['operation'] != kind or value['origin'] != signing_origin(request):
         raise SigningConflict()
     return intent, value
 

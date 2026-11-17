@@ -15,6 +15,8 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from crypto_access.models import AccessPolicy, FileAccessPolicy, FileVersion, KeyRevocation, StorageBucket, UploadedFile, UserProfile
+from crypto_access.models import UserPublicKey
+from crypto_access.services import native_signing
 from crypto_access.views import storage as storage_views
 
 
@@ -104,6 +106,31 @@ class VersionCryptoTests(TestCase):
             self.assertEqual(response.status_code, 200, getattr(response, 'data', None))
             self.assertEqual(response.content, b'version-1')
 
+    def test_preview_checks_the_exact_version_for_legacy_and_agent_signatures(self):
+        key = UserPublicKey.objects.create(user=self.admin, pqc_public_key='fixture-public-key')
+        first = self.version(1, 'ac17')
+        latest = self.version(2, 'tkn20')
+        first.signer_public_key = latest.signer_public_key = key
+        first.user_signature = 'legacy-signature'
+        latest.user_signature = 'agent-signature'
+        latest.signing_payload = json.dumps({
+            'protocol': native_signing.INTENT_PROTOCOL, 'operation': 'sign_document',
+            'sha3_256': hashlib.sha3_256(b'version-2').hexdigest(),
+        })
+        first.save(update_fields=['signer_public_key', 'user_signature'])
+        latest.save(update_fields=['signer_public_key', 'user_signature', 'signing_payload'])
+        path = '/api/storage/files/preview_by_path/?bucket=documents&path=report.txt'
+        with patch.object(native_signing, 'verify_signature') as verifier:
+            self.assertEqual(self.client.get(path + '&version=1')['X-CPQA-Origin'], 'verified')
+            verifier.assert_called_once_with(key.pqc_public_key, first.user_signature, b'version-1')
+            verifier.reset_mock()
+            self.assertEqual(self.client.get(path)['X-CPQA-Origin'], 'verified')
+            verifier.assert_called_once_with(key.pqc_public_key, latest.user_signature, latest.signing_payload.encode('ascii'))
+            verifier.reset_mock()
+            self.blobs[latest.physical_path] = self.crypto.encode(b'changed', 'tkn20', False)
+            self.assertEqual(self.client.get(path)['X-CPQA-Origin'], 'invalid')
+            verifier.assert_not_called()
+
     def test_revocation_rotates_cache_even_when_attributes_are_unchanged(self):
         self.version(1, 'ac17')
         url = f'/api/storage/files/{self.file.pk}/download/?version=1'
@@ -145,6 +172,13 @@ class VersionCryptoTests(TestCase):
             self.assertEqual(response.content, f'version-{number}'.encode())
 
     def test_upload_ac17_then_tkn20_retains_both_versions(self):
+        self.assert_upload_retains_both_versions()
+
+    @override_settings(FIELD_ENCRYPTION=True)
+    def test_upload_with_field_encryption_retains_both_versions(self):
+        self.assert_upload_retains_both_versions()
+
+    def assert_upload_retains_both_versions(self):
         self.file.delete()
         policy = AccessPolicy.objects.create(name='version_policy', subject_condition='r.sub.user_type == "super_admin"',
                                              resource='document', action='*', effect='allow')
