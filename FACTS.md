@@ -40,6 +40,8 @@ Hệ thống quản lý/chia sẻ file, có policy dựa trên thuộc tính ng�
 | `src/crypto_access/serializers/`, `views/` | Validation/API và xử lý request theo miền nghiệp vụ |
 | `src/crypto_access/services/casbin_service.py` | Đánh giá điều kiện AST, ABAC và kiểm tra quyền file |
 | `src/crypto_access/services/cpabe_service.py` | Lazy service, ctypes bindings hoặc gọi Vault ABE plugin |
+| `src/crypto_agent/prepare_upstream.py`, `src/crypto_agent/src/upstream.rs` | Chuẩn bị shared library của agent từ GitHub release mặc định hoặc build bằng Makefile upstream. Ghi manifest nguồn và hash, FFI tìm thư viện cạnh executable |
+| `src/crypto_agent/src/main.rs`, `src/crypto_agent/package_agent.py`, `src/crypto_access/services/agent_packages.py` | Native Messaging cho Chrome/Edge, ZIP pilot và catalog bộ cài. Trang Security Keys kiểm tra agent và chỉ phân phối file khớp SHA-256 đã công bố |
 | `src/crypto_access/services/vault_service.py` | Đọc/ghi Vault KV và cấu hình kết nối |
 | `src/crypto_access/services/storage/` | Interface, factory và adapters Supabase/S3/GCS/local |
 | `src/crypto_access/services/clamav_service.py`, `pki_service.py` | Quét file và gọi dịch vụ ký PKI |
@@ -121,7 +123,7 @@ CLI dùng Python standard library, cú pháp `rtk python start.py [cờ toàn c�
 | `help` hoặc không có command | In hướng dẫn. Không có nhánh `status`; dùng Compose `ps` để xem container. Cờ `-h/--help` được parse nhưng chưa có nhánh xử lý riêng để buộc hiển thị help. |
 | `setup` | Gọi `scripts/setup.py`: kiểm tra Docker/Compose, copy `.env` nếu thiếu, kiểm tra cert và thử cài Root CA vào trust store OS; không phải thao tác chỉ đọc. |
 | `build` | Compose build fetches/builds upstream crypto Git HEAD; prod first runs pull --ignore-buildable. Web/Vault use targets in the same Dockerfile; prod uses local images. |
-| `up`, `restart` | Compose up -d/restart, gọi Vault manager tối đa 10 lần với khoảng chờ 2 giây khi subprocess lỗi, trích xuất raw PQC root public key nếu cần, gọi warmup nếu `--ai`; có thể mở UDP6 relay trên Windows khi VPN IPv6/dual. |
+| `up`, `restart` | Compose up -d/restart, thử lại Vault khi lỗi tạm thời và dừng ngay khi `scripts/vault_manager.py` trả exit 78. Vault bootstrap mới kiểm tra thư mục khóa trước, chờ riêng tối đa 180 giây cho phản hồi init và lưu từng file bằng atomic replace. Sau khi Vault sẵn sàng, CLI trích xuất raw PQC root public key, warmup nếu `--ai` và có thể mở UDP6 relay trên Windows. |
 | `down` | Dừng UDP6 relay rồi Compose down; nhánh này không truyền `-v`. |
 | `logs` | Compose logs -f cho stack; không chuyển tiếp đối số service/filter từ `rest`. |
 | `makemigrations`, `migrate`, `initsettings` | Chạy manage.py trong service `web`, chuyển tiếp đối số; `initsettings` gọi `init_settings`. |

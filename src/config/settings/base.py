@@ -210,6 +210,13 @@ OLLAMA_CACERT = os.environ.get('OLLAMA_CACERT', '/certs/CyberFortress-RootCA.crt
 # Vault ABE Plugin Integration Toggle
 USE_VAULT_ABE_PLUGIN = os.environ.get('USE_VAULT_ABE_PLUGIN', 'False').lower() in ('true', '1', 't')
 VAULT_ABE_INTERNAL_DECRYPT = os.environ.get('VAULT_ABE_INTERNAL_DECRYPT', 'False').lower() in ('true', '1', 't')
+NATIVE_SIGNING_ENABLED = os.environ.get('NATIVE_SIGNING_ENABLED', 'false').lower() == 'true'
+NATIVE_SIGNING_REQUIRED = os.environ.get('NATIVE_SIGNING_REQUIRED', 'false').lower() == 'true'
+CRYPTO_AGENT_PACKAGE_DIR = os.environ.get('CRYPTO_AGENT_PACKAGE_DIR', '/config/crypto-agent')
+CRYPTO_AGENT_ORIGIN = os.environ.get('CRYPTO_AGENT_ORIGIN', '')
+CRYPTO_AGENT_MIN_VERSION = os.environ.get('CRYPTO_AGENT_MIN_VERSION', '0.1.0')
+CRYPTO_AGENT_CHROME_EXTENSION_ID = os.environ.get('CRYPTO_AGENT_CHROME_EXTENSION_ID', '')
+CRYPTO_AGENT_EDGE_EXTENSION_ID = os.environ.get('CRYPTO_AGENT_EDGE_EXTENSION_ID', '')
 CPABE_SCHEME = os.environ.get('CPABE_SCHEME', 'ac17')
 
 # Email Configuration
@@ -368,7 +375,7 @@ CSRF_COOKIE_SAMESITE = 'Lax'
 ABAC_PROTECTED_ROUTES = [
     # Specific patterns must come FIRST (before generic /api/storage/files/)
     {
-        'pattern': r'^/api/storage/files/upload/',
+        'pattern': r'^/api/storage/files/(?:upload|prepare_document_signature)/',
         'resource': 'document',
         'methods': {
             'POST': 'upload',

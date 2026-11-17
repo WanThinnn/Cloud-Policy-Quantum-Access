@@ -11,8 +11,12 @@ app_name = 'admin_pages'
 
 def files_page(request):
     """Render document management page"""
+    from crypto_access.services.agent_packages import public_config
     from crypto_access.services.runtime_settings import get_runtime_setting
-    return render(request, 'documents/files.html', {'upload_max_size_mb': get_runtime_setting('UPLOAD_MAX_SIZE_MB')})
+    return render(request, 'documents/files.html', {
+        'upload_max_size_mb': get_runtime_setting('UPLOAD_MAX_SIZE_MB'),
+        'crypto_agent': public_config(request.user),
+    })
 
 def trash_page(request):
     """Render trash management page"""

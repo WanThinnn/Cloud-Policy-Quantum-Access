@@ -1,0 +1,79 @@
+name: Build Crypto Agent installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      origin:
+        description: CPQA HTTPS origin
+        required: true
+        type: string
+      chrome_id:
+        description: Chrome extension ID
+        required: true
+        type: string
+      edge_id:
+        description: Edge extension ID (optional when using the Chrome extension in Edge)
+        required: false
+        type: string
+      extension_key:
+        description: Base64 DER public key for a stable unpacked extension ID (optional)
+        required: false
+        type: string
+      upstream_tag:
+        description: Upstream release tag (blank selects the latest release)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: windows-x86_64
+          - runner: ubuntu-22.04
+            target: linux-x86_64
+          - runner: macos-15-intel
+            target: macos-x86_64
+          - runner: macos-15
+            target: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CPQA_ORIGIN: ${{ inputs.origin }}
+      CPQA_CHROME_ID: ${{ inputs.chrome_id }}
+      CPQA_EDGE_ID: ${{ inputs.edge_id }}
+      CPQA_EXTENSION_KEY: ${{ inputs.extension_key }}
+      CPQA_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Select Rust toolchain
+        run: rustup default 1.89.0
+      - name: Build agent and installer
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+          command = [sys.executable, 'src/crypto_agent/package_agent.py',
+                     '--origin', os.environ['CPQA_ORIGIN'], '--extension-id', os.environ['CPQA_CHROME_ID'],
+                     '--output-dir', 'src/crypto_agent/target/distribution']
+          for flag, name in [('--extension-id', 'CPQA_EDGE_ID'), ('--extension-key', 'CPQA_EXTENSION_KEY'),
+                             ('--ref', 'CPQA_UPSTREAM_TAG')]:
+              if os.environ[name]:
+                  command.extend([flag, os.environ[name]])
+          subprocess.run(command, check=True)
+      - name: Run agent protocol and packaged ABI smoke tests
+        run: python src/crypto_agent/test_packaged_agent.py src/crypto_agent/target/distribution
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crypto-agent-${{ matrix.target }}
+          path: src/crypto_agent/target/distribution

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Manage Security Keys - Cloud Policy Crypto Access{% endblock %}
 
@@ -9,6 +10,45 @@
             <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Security Keys</h1>
             <p class="text-sm text-gray-500 mt-2">Manage your authentication and document signing keys here.</p>
         </div>
+        <section id="crypto-agent-setup" class="mb-6 rounded-lg bg-white dark:bg-gray-800 p-6 shadow" aria-labelledby="crypto-agent-title">
+            <h2 id="crypto-agent-title" class="text-lg font-semibold text-gray-900 dark:text-white">Crypto Agent</h2>
+            <p id="crypto-agent-status" role="status" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                {% if crypto_agent %}
+                Check this browser and device before signing documents.
+                {% else %}
+                Crypto Agent setup is currently disabled for this deployment. Contact your administrator to enable it.
+                {% endif %}
+            </p>
+            <div class="mt-4 flex flex-wrap gap-3">
+                <button type="button" id="crypto-agent-check" {% if not crypto_agent %}disabled aria-describedby="crypto-agent-status"{% endif %} class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed">Check Crypto Agent</button>
+                <a id="crypto-agent-extension" hidden target="_blank" rel="noopener noreferrer" class="rounded-md border px-4 py-2 text-sm text-indigo-700 dark:text-indigo-300">Get browser extension</a>
+                <button type="button" id="crypto-agent-enroll" hidden class="rounded-md border px-4 py-2 text-sm text-indigo-700 dark:text-indigo-300">Register signing device</button>
+            </div>
+            {% if crypto_agent %}
+            <details id="crypto-agent-downloads" class="mt-4 text-sm text-gray-600 dark:text-gray-300">
+                <summary class="cursor-pointer font-medium">Download an installer</summary>
+                <ul class="mt-2 space-y-3">
+                    {% for package in agent_packages %}
+                    <li data-agent-target="{{ package.target }}">
+                        <a href="{{ package.url }}" class="font-medium text-indigo-700 underline dark:text-indigo-300">{{ package.label }} · {{ package.version }}</a>
+                        <span class="block break-all text-xs">SHA-256 {{ package.sha256 }}</span>
+                        {% if package.install_command %}
+                        <span class="block text-xs">Extract the ZIP, then run <code>{{ package.install_command }}</code> from that folder.</span>
+                        {% endif %}
+                    </li>
+                    {% empty %}
+                    <li>No installers have been published for this deployment.</li>
+                    {% endfor %}
+                </ul>
+                <p class="mt-3">Run the installer on this device, then return here and check again. If your platform is missing, contact your administrator.</p>
+            </details>
+            {% endif %}
+        </section>
+        {% if crypto_agent %}
+        {{ crypto_agent|json_script:"crypto-agent-config" }}
+        <script defer src="{% static 'js/crypto-agent.js' %}?v=2"></script>
+        <script defer src="{% static 'js/crypto-agent-setup.js' %}"></script>
+        {% endif %}
         
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <!-- Login Passkeys Card -->
@@ -213,7 +253,7 @@
                 const activeKeys = pqcKeys.filter(k => k.status !== 'revoked');
                 
                 const btnAdd = document.getElementById('btn-add-pqc-key');
-                if (activeKeys.length > 0) {
+                if (activeKeys.some(key => !key.native_device_id)) {
                     btnAdd.disabled = true;
                     btnAdd.title = "You already have an active PQC Key. You can only have one at a time. Please revoke it or use Import.";
                 } else {
@@ -250,6 +290,7 @@
                             <div>
                                 <p class="text-sm font-medium text-gray-900 dark:text-white font-mono" title="${k.pqc_public_key}">${k.pqc_public_key ? k.pqc_public_key.substring(0, 16) : 'Unknown'}...</p>
                                 <p class="text-xs text-gray-500 mt-1">Added on ${new Date(k.created_at).toLocaleString()}</p>
+                                ${k.native_device_id ? '<p class="text-xs text-gray-500 mt-1">Crypto Agent device</p>' : ''}
                                 ${caVerifiedHtml}
                             </div>
                             <button onclick="deletePqcKey('${k.id}')" class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300 text-sm font-medium">Revoke</button>

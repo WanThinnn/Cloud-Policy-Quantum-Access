@@ -9,11 +9,15 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.http import FileResponse, Http404
+from django.urls import reverse
 from django.utils import timezone
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_safe
 from django.conf import settings
 from datetime import timedelta
+import hashlib
 import secrets
 import logging
 import uuid
@@ -35,6 +39,7 @@ from ..serializers import (
     VerifyOTPSerializer,
 )
 from ..models import UserProfile, ActiveSession, AccessLog
+from ..services import agent_packages
 from ..services.session_service import issue_session_tokens, session_key, set_auth_cookies
 
 def get_client_ip(request):
@@ -67,10 +72,50 @@ def user_profile(request):
 @login_required(login_url='/auth/login/')
 def manage_keys_page(request):
     """Render manage keys page"""
-    from django.shortcuts import render
-    return render(request, 'accounts/keys.html', {
-        'page_title': 'Manage Security Keys'
-    })
+    context = {'page_title': 'Manage Security Keys'}
+    context['crypto_agent'] = agent_packages.public_config(request.user)
+    if context['crypto_agent']:
+        context['agent_packages'] = [
+            {
+                'label': package['label'],
+                'version': package['version'],
+                'sha256': package['sha256'],
+                'install_command': package.get('install_command'),
+                'target': target,
+                'url': reverse('crypto_agent_download', args=[target]),
+            }
+            for target, package in agent_packages.package_catalog().items()
+        ]
+    return render(request, 'accounts/keys.html', context)
+
+
+@login_required(login_url='/auth/login/')
+@require_safe
+def crypto_agent_download(request, target):
+    """Stream only an approved installer whose digest matches the catalog."""
+    if not getattr(settings, 'NATIVE_SIGNING_ENABLED', False):
+        raise Http404()
+    package = agent_packages.package_catalog().get(target)
+    if package is None:
+        raise Http404()
+    try:
+        stream = package['path'].open('rb')
+    except OSError:
+        raise Http404() from None
+    try:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+        if digest.hexdigest() != package['sha256']:
+            raise Http404()
+        stream.seek(0)
+        response = FileResponse(stream, as_attachment=True, filename=package['filename'],
+                                content_type='application/octet-stream')
+    except Exception:
+        stream.close()
+        raise
+    response['Cache-Control'] = 'private, no-store'
+    return response
 
 
 @csrf_exempt

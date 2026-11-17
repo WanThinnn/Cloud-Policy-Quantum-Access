@@ -3,6 +3,7 @@ Public Key Infrastructure (PKI) Models
 Stores ML-DSA-87 Public Keys and Encrypted Secret Keys for Users.
 """
 from django.db import models
+import uuid
 from django.contrib.auth.models import User
 from .base import BaseModel
 
@@ -67,6 +68,7 @@ class UserPublicKey(BaseModel):
         null=True,
         help_text="Base64 encoded ML-DSA-87 signature from the RootCA over the JSON representation of this key"
     )
+    native_device_id = models.UUIDField(null=True, blank=True, unique=True, editable=False)
 
     class Meta:
         db_table = 'crypto_user_pki_keys'
@@ -79,4 +81,13 @@ class UserPublicKey(BaseModel):
     
     def revoke(self):
         self.status = 'revoked'
-        self.save()
+        self.save(update_fields=['status', 'updated_at'])
+
+
+class NativeSigningRequest(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    key = models.ForeignKey(UserPublicKey, on_delete=models.CASCADE, null=True, blank=True)
+    payload = models.TextField()
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)

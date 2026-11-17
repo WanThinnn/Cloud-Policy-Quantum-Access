@@ -76,7 +76,8 @@ class FileUploadSerializer(serializers.Serializer):
     tags = serializers.ListField(child=serializers.CharField(), required=False)
     is_public = serializers.BooleanField(default=False)
     policy_id = serializers.IntegerField(required=False, help_text="Policy ID for CP-ABE encryption")
-    user_signature = serializers.CharField(required=False, allow_blank=True, help_text="Base64 encoded ML-DSA-87 signature")
+    user_signature = serializers.CharField(required=False, allow_blank=True, max_length=6172)
+    signing_request_id = serializers.UUIDField(required=False)
     
     # For creating new policy (optional)
     create_new_policy = serializers.BooleanField(default=False)
@@ -109,6 +110,14 @@ class FileUploadSerializer(serializers.Serializer):
                         f"'{field}' is required when creating new policy"
                     )
         return data
+
+
+class DocumentSignatureRequestSerializer(serializers.Serializer):
+    bucket_name = serializers.CharField(max_length=100)
+    file_path = serializers.CharField(max_length=500)
+    device_id = serializers.UUIDField()
+    sha3_256 = serializers.RegexField(r'\A[0-9a-f]{64}\Z')
+    is_new_version = serializers.BooleanField(default=False)
 
 
 class SignedUrlRequestSerializer(serializers.Serializer):

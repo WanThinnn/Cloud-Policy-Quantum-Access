@@ -47,6 +47,7 @@ services:
     volumes:
       - ${DB_DIR:-sqlite_volume}:/app/data
       - ${VAULT_RUNTIME_TOKEN_DIR:-./config/vault-runtime}:/run/cpqa-vault:ro
+      - ./config/crypto-agent:/config/crypto-agent:ro
       - ./docs:/docs
       - ./logs:/app/logs
       - ${CERTS_DIR:-./config/certs}/${ROOT_CA_FILENAME:-CyberFortress-RootCA.crt}:/certs/${ROOT_CA_FILENAME:-CyberFortress-RootCA.crt}:ro

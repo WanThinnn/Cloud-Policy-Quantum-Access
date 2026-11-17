@@ -63,6 +63,7 @@ template_patterns = [
     path('register/', auth.register_page, name='register_page'),
     path('profile/', auth.user_profile, name='user_profile'),
     path('keys/', auth.manage_keys_page, name='manage_keys_page'),
+    path('keys/crypto-agent/<slug:target>/', auth.crypto_agent_download, name='crypto_agent_download'),
     
     # Password Reset
     path('password-reset/', 

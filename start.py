@@ -11,6 +11,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 import os
 import json
@@ -44,6 +45,21 @@ def compose_cmd(files: list[Path], use_ssl: bool, use_tunnel: bool, use_vpn: boo
 
 def run(cmd: list[str]) -> None:
     subprocess.run(cmd, cwd=REPO_ROOT, check=True)
+
+
+def wait_for_vault_bootstrap(cmd: list[str]) -> bool:
+    for attempt in range(10):
+        try:
+            run(cmd)
+            return True
+        except subprocess.CalledProcessError as exc:
+            # vault_manager uses EX_CONFIG for bootstrap states that need an operator.
+            if exc.returncode == 78:
+                return False
+            if attempt < 9:
+                time.sleep(2)
+    print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
+    return False
 
 
 def call_setup(script_path: Path) -> None:
@@ -406,17 +422,7 @@ def main(argv: list[str]) -> int:
             print(color_info("\n[3/3] Restarting containers..."))
             run(c + ["up", "-d"])
             print(color_info(f"\n{vault_wait_message}"))
-            import time
-            success = False
-            for _ in range(10):
-                try:
-                    run(c + vault_cmd)
-                    success = True
-                    break
-                except subprocess.CalledProcessError:
-                    time.sleep(2)
-            if not success:
-                print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
+            if not wait_for_vault_bootstrap(c + vault_cmd):
                 return 1
             
             extract_pqc_raw_key(c)
@@ -429,17 +435,7 @@ def main(argv: list[str]) -> int:
             # print(f"{status_line}\n")
             run(c + ["up", "-d"])
             print(color_info(f"\n{vault_wait_message}"))
-            import time
-            success = False
-            for _ in range(10):
-                try:
-                    run(c + vault_cmd)
-                    success = True
-                    break
-                except subprocess.CalledProcessError:
-                    time.sleep(2)
-            if not success:
-                print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
+            if not wait_for_vault_bootstrap(c + vault_cmd):
                 return 1
             
             extract_pqc_raw_key(c)
@@ -459,17 +455,7 @@ def main(argv: list[str]) -> int:
             # print(f"{status_line}\n")
             run(c + ["restart"])
             print(color_info(f"\n{vault_wait_message}"))
-            import time
-            success = False
-            for _ in range(10):
-                try:
-                    run(c + vault_cmd)
-                    success = True
-                    break
-                except subprocess.CalledProcessError:
-                    time.sleep(2)
-            if not success:
-                print(color_warning("Vault readiness check failed. Check the web container, Vault status and runtime credentials."))
+            if not wait_for_vault_bootstrap(c + vault_cmd):
                 return 1
             
             extract_pqc_raw_key(c)

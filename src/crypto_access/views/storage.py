@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import APIException, NotFound, PermissionDenied
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from crypto_access.permissions import IsSuperAdmin
 from django.http import HttpResponse
 from django.utils import timezone
@@ -22,7 +22,7 @@ import tempfile
 import os
 import urllib.parse
 
-from ..models import StorageBucket, UploadedFile, FileAccessPolicy, AccessPolicy, FileVersion
+from ..models import StorageBucket, UploadedFile, FileAccessPolicy, AccessPolicy, FileVersion, UserPublicKey
 from ..serializers import (
     StorageBucketSerializer,
     UploadedFileSerializer,
@@ -31,12 +31,14 @@ from ..serializers import (
 )
 from ..serializers.storage import (
     FileAccessPolicySerializer,
+    DocumentSignatureRequestSerializer,
     AssignPolicyToFileSerializer,
     PolicyListForAssignmentSerializer,
     RestoreFileVersionSerializer,
 )
 from ..serializers.policy import AccessPolicySerializer
 from ..services.storage.factory import get_storage_service
+from ..services import native_signing
 from ..services.cpabe_service import CPABEAccessDenied, CPABEVaultUnavailable, cpabe_service
 from ..services.casbin_service import casbin_service
 from ..services.tkn20_policy import bypass_attributes
@@ -370,6 +372,35 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied('Your attributes do not grant access to this document.')
 
     @action(detail=False, methods=['post'], throttle_classes=[CPABEEncryptThrottle])
+    def prepare_document_signature(self, request):
+        if not casbin_service.check_access(request.user, 'document', 'upload'):
+            raise PermissionDenied('Document upload permission is required.')
+        serializer = DocumentSignatureRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        value = serializer.validated_data
+        bucket = StorageBucket.objects.filter(name=value['bucket_name']).first()
+        if bucket is None:
+            raise NotFound()
+        key = UserPublicKey.objects.filter(
+            user=request.user, native_device_id=value['device_id'], status='active',
+        ).first()
+        if key is None:
+            raise PermissionDenied('The signing device is not authorized.')
+        existing = UploadedFile.find_by_path(bucket.name, value['file_path'])
+        if bool(existing) != value['is_new_version']:
+            raise native_signing.SigningConflict()
+        if existing and existing.uploaded_by_id != request.user.pk and not request.user.is_superuser:
+            raise PermissionDenied('Only the owner can submit a new version.')
+        latest = existing.get_latest_version() if existing else None
+        version = latest.version_number + 1 if latest else (2 if existing else 1)
+        intent = native_signing.issue(
+            request, 'sign_document', key=key, device_id=str(key.native_device_id),
+            key_id=key.pk, sha3_256=value['sha3_256'],
+            **native_signing.version_target(bucket, value['file_path'], existing, version),
+        )
+        return Response({'request_id': intent.pk, 'payload': intent.payload}, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], throttle_classes=[CPABEEncryptThrottle])
     @transaction.atomic
     def upload(self, request):
         """
@@ -395,6 +426,12 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
 
         serializer = FileUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        from django.conf import settings
+        signing_request_id = serializer.validated_data.get('signing_request_id')
+        if getattr(settings, 'NATIVE_SIGNING_REQUIRED', False) and not signing_request_id:
+            raise PermissionDenied('A native document signature is required.')
+        if signing_request_id and not getattr(settings, 'NATIVE_SIGNING_ENABLED', False):
+            raise PermissionDenied('Native signing is disabled.')
         new_policy = self._prepare_inline_policy(request, serializer.validated_data)
         
         file = serializer.validated_data['file']
@@ -457,7 +494,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         
         # Get or create bucket
         try:
-            bucket = StorageBucket.objects.get(name=bucket_name)
+            bucket = StorageBucket.objects.select_for_update().get(name=bucket_name)
         except StorageBucket.DoesNotExist:
             return Response(
                 {'error': f"Bucket '{bucket_name}' not found"},
@@ -478,13 +515,12 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
         if field_encryption:
             from crypto_access.models.fields import get_encryption_key
             import hmac
-            import hashlib
             key = get_encryption_key(info=b"blind_index")
             h = hmac.new(key, str(file_path).encode('utf-8'), hashlib.sha3_256)
             hash_value = h.hexdigest()
-            existing_file = UploadedFile.objects.filter(bucket=bucket, file_path_hash=hash_value).first()
+            existing_file = UploadedFile.objects.select_for_update().filter(bucket=bucket, file_path_hash=hash_value).first()
         else:
-            existing_file = UploadedFile.objects.filter(bucket=bucket, file_path=file_path).first()
+            existing_file = UploadedFile.objects.select_for_update().filter(bucket=bucket, file_path=file_path).first()
             
         is_new_version_val = request.data.get('is_new_version', 'false')
         #print(f"DEBUG: is_new_version received = {is_new_version_val} (type: {type(is_new_version_val)})")
@@ -546,12 +582,27 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
             # Reset file pointer for reading into buffer for CP-ABE
             file.seek(0)
             plaintext_data = file.read()
+            signer_key = None
+            signing_payload = ''
+            if signing_request_id:
+                if not user_signature or not serializer.validated_data.get('file_path'):
+                    raise ValidationError('A native signing request requires a signature and an explicit file path.')
+                target = native_signing.version_target(bucket, file_path, existing_file, version_number)
+                signer_key, signing_payload = native_signing.verify_upload(
+                    request, signing_request_id, user_signature, plaintext_file_hash, target,
+                )
+            elif user_signature:
+                signer_key = request.user.pqc_keys.filter(status='active', native_device_id__isnull=True).first()
+                if signer_key is None:
+                    raise ValidationError('An active browser signing key is required.')
+                native_signing.verify_signature(signer_key.pqc_public_key, user_signature, plaintext_data)
             
             # SYNCHRONOUS MALWARE SCAN (EARLY REJECTION)
             # Quét virus ngay lập tức trước khi thực hiện mã hóa CP-ABE nặng nề
             from ..services.clamav_service import clamav_service
             is_safe, msg = clamav_service.scan_file_buffer(plaintext_data)
             if not is_safe:
+                transaction.set_rollback(True)
                 logger.warning(f"Upload rejected by Anti-Virus: {msg}")
                 return Response(
                     {'error': f'Upload failed: malware detected ({msg})'}, 
@@ -629,12 +680,10 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 )
                 
             # Create FileVersion
-            signer_key = None
             trusted_timestamp = None
             tsa_signature = None
             
             if user_signature and request.user.is_authenticated:
-                signer_key = request.user.pqc_keys.filter(status='active').order_by('-created_at').first()
                 # Generate Trusted Timestamp
                 from ..services.pki_service import PKIService
                 trusted_timestamp = timezone.now()
@@ -659,6 +708,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 crypto_metadata=crypto_metadata,
                 uploaded_by=request.user if request.user.is_authenticated else None,
                 user_signature=user_signature,
+                signing_payload=signing_payload,
                 signer_public_key=signer_key,
                 trusted_timestamp=trusted_timestamp,
                 tsa_signature=tsa_signature
@@ -678,6 +728,8 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_201_CREATED
             )
             
+        except APIException:
+            raise
         except Exception as e:
             transaction.set_rollback(True)
             return Response(
@@ -883,6 +935,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                     file=file, version_number=latest.version_number + 1, physical_path=destination,
                     file_size=source.file_size, cpabe_policy=source.cpabe_policy, crypto_metadata=source_crypto,
                     uploaded_by=request.user, user_signature=source.user_signature,
+                    signing_payload=source.signing_payload,
                     signer_public_key=source.signer_public_key, trusted_timestamp=source.trusted_timestamp,
                     tsa_signature=source.tsa_signature,
                 )
@@ -1081,10 +1134,13 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                     # It's a regular file
                     if file_dir == path:
                         meta = dict(db_file.metadata) if db_file.metadata else {}
+                        for name in ('user_signature', 'signing_payload', 'signer_public_key', 'tsa_signature', 'trusted_timestamp'):
+                            meta.pop(name, None)
                         latest_version = db_file.get_latest_version()
                         if latest_version:
                             if latest_version.user_signature:
                                 meta['user_signature'] = latest_version.user_signature
+                                meta['signing_payload'] = latest_version.signing_payload
                             if latest_version.signer_public_key:
                                 meta['signer_public_key'] = latest_version.signer_public_key.pqc_public_key
                             if latest_version.tsa_signature:
@@ -2086,6 +2142,7 @@ class UploadedFileViewSet(viewsets.ModelViewSet):
                         physical_path=physical_path, file_size=file_record.file_size,
                         cpabe_policy=policy_to_encrypt or '', crypto_metadata=crypto_metadata,
                         uploaded_by=request.user, user_signature=latest_version.user_signature,
+                        signing_payload=latest_version.signing_payload,
                         signer_public_key=latest_version.signer_public_key,
                         trusted_timestamp=latest_version.trusted_timestamp, tsa_signature=latest_version.tsa_signature,
                     )

@@ -13,11 +13,13 @@ class UserPublicKeySerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'username', 'pqc_public_key',
             'encrypted_pqc_sk_primary', 'encrypted_pqc_sk_recovery',
-            'credential_id', 'status', 'device_name', 'ca_signature', 'created_at', 'updated_at'
+            'credential_id', 'status', 'device_name', 'ca_signature', 'created_at', 'updated_at', 'native_device_id'
         ]
-        read_only_fields = ['user', 'status', 'ca_signature', 'created_at', 'updated_at']
+        read_only_fields = ['user', 'status', 'ca_signature', 'created_at', 'updated_at', 'native_device_id']
 
     def validate(self, attrs):
+        if self.instance and self.instance.native_device_id:
+            raise serializers.ValidationError('Native signing keys can only be revoked.')
         primary_field = 'encrypted_pqc_sk_primary'
         credential_field = 'credential_id'
         if self.instance is not None and (primary_field in attrs or credential_field in attrs):

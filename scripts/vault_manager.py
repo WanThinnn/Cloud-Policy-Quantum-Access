@@ -5,6 +5,7 @@ import urllib.request
 import urllib.error
 import argparse
 import ssl
+import tempfile
 
 # Install hvac if running outside container but we assume it's running inside `web` container
 try:
@@ -20,6 +21,58 @@ VAULT_SECRET_PATH = os.environ.get('VAULT_SECRET_PATH', 'secret/data/crypto_acce
 KEYS_DIR = os.environ.get('KEYS_DIR', '/app/config/keys')
 UNSEAL_KEYS_FILE = os.path.join(KEYS_DIR, 'vault_unseal_keys.json')
 TOKEN_FILE = os.path.join(KEYS_DIR, 'vault_token.txt')
+VAULT_INIT_TIMEOUT = 180
+VAULT_BOOTSTRAP_BLOCKED = 78
+
+
+class VaultBootstrapBlocked(RuntimeError):
+    """The operator must inspect bootstrap state before another attempt."""
+
+
+def write_bootstrap_file(path, content):
+    """Keep a complete credential file and restrict access to the current user."""
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=KEYS_DIR, delete=False) as output:
+            temporary_path = output.name
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
+def initialize_new_vault(verify, shares, threshold):
+    # Test the destination before requesting credentials that Vault returns only once.
+    try:
+        os.makedirs(KEYS_DIR, exist_ok=True)
+        with tempfile.TemporaryFile(dir=KEYS_DIR):
+            pass
+    except OSError:
+        raise VaultBootstrapBlocked("Vault bootstrap requires a writable keys directory.") from None
+    initializer = hvac.Client(url=VAULT_ADDR, verify=verify, timeout=VAULT_INIT_TIMEOUT)
+    try:
+        result = initializer.sys.initialize(secret_shares=shares, secret_threshold=threshold)
+        keys = result['keys']
+        root_token = result['root_token']
+        if not keys or not root_token:
+            raise ValueError()
+    except Exception:
+        raise VaultBootstrapBlocked(
+            "Vault initialization did not return credentials. Check its initialization state and local "
+            "credential files before retrying. A committed initialization cannot issue the same shares again."
+        ) from None
+    try:
+        write_bootstrap_file(UNSEAL_KEYS_FILE, json.dumps({'keys': keys}))
+        write_bootstrap_file(TOKEN_FILE, root_token)
+    except OSError:
+        raise VaultBootstrapBlocked(
+            "Vault initialized, but one or more local credential files could not be saved. "
+            "Check the keys directory and use the operator recovery procedure."
+        ) from None
+    return keys, root_token
 
 
 def unseal_with_keys(client, keys):
@@ -235,14 +288,8 @@ def init_and_unseal():
     if not wait_for_vault():
         raise RuntimeError("Vault did not become reachable in time.")
 
-    ca_cert_path = get_ca_cert_path()
-    if VAULT_ADDR.startswith('https'):
-        if ca_cert_path:
-            client = hvac.Client(url=VAULT_ADDR, verify=ca_cert_path)
-        else:
-            client = hvac.Client(url=VAULT_ADDR, verify=True)
-    else:
-        client = hvac.Client(url=VAULT_ADDR)
+    verify = (get_ca_cert_path() or True) if VAULT_ADDR.startswith('https') else True
+    client = hvac.Client(url=VAULT_ADDR, verify=verify)
     
     try:
         is_initialized = client.sys.is_initialized()
@@ -254,17 +301,7 @@ def init_and_unseal():
         threshold = 3 if is_prod else 1
 
         print("Vault is not initialized. Initializing...")
-        result = client.sys.initialize(secret_shares=shares, secret_threshold=threshold)
-        root_token = result['root_token']
-        keys = result['keys']
-        
-        # Save keys and token
-        os.makedirs(KEYS_DIR, exist_ok=True)
-        with open(UNSEAL_KEYS_FILE, 'w') as f:
-            json.dump({'keys': keys}, f)
-        
-        with open(TOKEN_FILE, 'w') as f:
-            f.write(root_token)
+        keys, root_token = initialize_new_vault(verify, shares, threshold)
             
         print(f"Vault initialized. Unseal keys saved to {UNSEAL_KEYS_FILE}")
         
@@ -302,17 +339,21 @@ def init_and_unseal():
                 print("=======================================================\033[0m\n")
                 raise RuntimeError("Production Vault requires manual unsealing.")
 
-            print("Vault is sealed. Attempting auto-unseal...")
             if not os.path.exists(UNSEAL_KEYS_FILE):
-                raise RuntimeError(f"Cannot unseal: {UNSEAL_KEYS_FILE} not found!")
+                raise VaultBootstrapBlocked(
+                    f"Vault is initialized and sealed, but {UNSEAL_KEYS_FILE} is missing. "
+                    "Restore the original shares for this Vault. For a disposable local Vault with no shares, "
+                    "recreate its Vault data volume after checking that no data needs to be retained."
+                )
             
-            with open(UNSEAL_KEYS_FILE, 'r') as f:
-                data = json.load(f)
-                keys = data.get('keys', [])
-                
-            if not keys:
-                raise RuntimeError("No keys found in unseal file!")
-                
+            try:
+                with open(UNSEAL_KEYS_FILE, 'r', encoding='utf-8') as f:
+                    keys = json.load(f)['keys']
+                if not isinstance(keys, list) or not keys or not all(isinstance(key, str) and key for key in keys):
+                    raise ValueError()
+            except (OSError, ValueError, KeyError, TypeError):
+                raise VaultBootstrapBlocked("The saved Vault unseal file is unreadable or contains no valid shares.") from None
+            print("Vault is sealed. Attempting auto-unseal...")
             unseal_with_keys(client, keys)
             print("Vault unsealed successfully.")
         else:
@@ -331,11 +372,14 @@ def init_and_unseal():
         # Register ABE plugin if configured
         register_abe_plugin(client)
     else:
-        raise RuntimeError("No saved Vault token found; engine setup cannot continue.")
+        raise VaultBootstrapBlocked("No saved Vault token found; engine setup cannot continue.")
 
 if __name__ == '__main__':
     try:
         init_and_unseal()
+    except VaultBootstrapBlocked as exc:
+        print(f"Vault bootstrap blocked: {exc}")
+        raise SystemExit(VAULT_BOOTSTRAP_BLOCKED)
     except Exception as exc:
         print(f"Vault setup failed: {exc}")
         raise SystemExit(1)

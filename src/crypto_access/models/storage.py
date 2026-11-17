@@ -148,6 +148,7 @@ class FileVersion(models.Model):
     file_size = models.BigIntegerField(help_text="File size in bytes")
     cpabe_policy = models.TextField(blank=True, null=True, help_text="CP-ABE policy string used to encrypt this specific version")
     crypto_metadata = models.JSONField(default=dict, blank=True)
+    signing_payload = models.TextField(blank=True, default='')
     uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     

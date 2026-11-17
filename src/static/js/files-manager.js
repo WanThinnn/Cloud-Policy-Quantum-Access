@@ -848,7 +848,16 @@
                         let sigVerificationHtml = '';
                         const buffer = await blob.arrayBuffer();
                         if (typeof pqcManager !== 'undefined') {
-                            const isValid = await pqcManager.verifySignature(buffer, fileObj.metadata.user_signature, fileObj.metadata.signer_public_key);
+                            const { signing_payload, user_signature, signer_public_key } = fileObj.metadata;
+                            let isValid;
+                            if (signing_payload) {
+                                const intent = JSON.parse(signing_payload);
+                                isValid = intent.protocol === 'cpqa-crypto/v1' && intent.operation === 'sign_document'
+                                    && intent.sha3_256 === sha3_256(buffer)
+                                    && await pqcManager.verifySignatureRaw(new TextEncoder().encode(signing_payload), user_signature, signer_public_key);
+                            } else {
+                                isValid = await pqcManager.verifySignature(buffer, user_signature, signer_public_key);
+                            }
                             if (isValid) {
                                 sigVerificationHtml = `
                                 <div class="relative group justify-center w-32 h-10 px-2 py-1 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded flex items-center gap-2 cursor-help">
@@ -1432,14 +1441,38 @@
 
         // Setup PQC Signature
         let userSignature = null;
+        let useNativeSigning = false;
         try {
-            if (typeof requirePqcUnlock === 'function' && window.ENABLE_PQC_FEATURES) {
+            useNativeSigning = Boolean(window.cpqaCryptoAgent?.shouldSignDocument());
+            if (useNativeSigning) {
+                const signature = await window.cpqaCryptoAgent.signDocument(file, targetPath, Boolean(window.isVersionUpload));
+                userSignature = signature.signature;
+                formData.append('signing_request_id', signature.requestId);
+            } else if (typeof requirePqcUnlock === 'function' && window.ENABLE_PQC_FEATURES) {
                 await requirePqcUnlock();
                 const fileBuffer = await file.arrayBuffer();
                 userSignature = await pqcManager.signFile(fileBuffer);
             }
         } catch (err) {
-            showAlert('PQC Signature Failed: ' + err.message, 'error');
+            if (useNativeSigning && err.code !== 'server_rejected_request') {
+                const container = document.getElementById('upload-error-container');
+                const errorText = document.getElementById('upload-error-text');
+                if (container && errorText) {
+                    const link = document.createElement('a');
+                    link.href = '/auth/keys/#crypto-agent-setup';
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.className = 'underline';
+                    link.textContent = 'Check or set up Crypto Agent';
+                    errorText.replaceChildren(link);
+                    container.classList.remove('hidden');
+                    return;
+                }
+            }
+            const message = err.code === 'server_rejected_request'
+                ? 'CPQA could not prepare the signature. Check your session and whether the file version changed.'
+                : 'PQC Signature Failed: ' + err.message;
+            showAlert(message, 'error');
             return;
         }
 

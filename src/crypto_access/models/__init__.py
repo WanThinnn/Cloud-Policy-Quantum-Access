@@ -24,7 +24,7 @@ from .settings import SystemSetting
 from .session import ActiveSession
 
 # PKI Management
-from .pki import UserPublicKey
+from .pki import NativeSigningRequest, UserPublicKey
 
 # WebAuthn / Passkey Login
 from .webauthn import WebAuthnCredential
